@@ -1,0 +1,29 @@
+{
+  "name": "kb-browser",
+  "version": "0.1.0",
+  "description": "CLI-operable browser built on Playwright + Chromium (CDP)",
+  "license": "MIT",
+  "bin": {
+    "kb": "dist/cli.js",
+    "kb-mcp": "dist/mcp.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "kb": "node dist/cli.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "commander": "^13.1.0",
+    "playwright": "^1.53.0",
+    "socks": "^2.8.9",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
