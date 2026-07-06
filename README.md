@@ -1,81 +1,94 @@
 # kb — CLI Browser
 
-**すべての操作を CLI から行えるブラウザ。** Playwright + Chromium (CDP) ベース。
+**A browser you operate entirely from the command line.** Built on Playwright + Chromium (CDP).
 
-GUI ブラウザが持つ機能 — レンダリング、Cookie 管理、DevTools 操作(Network / Console / Elements)— を `kb` コマンドで扱えます。FoxyProxy 風のプロキシプロファイル管理(**ブラウザ無再起動の即時切替**、ホスト別振り分けルール)を内蔵。Claude Code などの AI エージェントから Bash / MCP 経由で操作することを想定しつつ、ウィンドウは本物の Chrome なので人間の手動操作といつでも併用できます。
+日本語版は [README.ja.md](README.ja.md) を参照してください。
 
-## インストール
+Everything a GUI browser gives you — page rendering, cookie management, DevTools operations (Network / Console / Elements) — is available as `kb` commands. FoxyProxy-style proxy profiles are built in, with **restart-free switching** and per-host routing rules. Designed to be driven by AI agents (Claude Code, etc.) via Bash or MCP, while the window is a real Chrome you can use by hand at any time.
+
+## Features
+
+- **Daemon architecture** — the browser stays resident; every CLI command returns in tens of milliseconds
+- **Real Chrome** — uses your installed Chrome/Edge (DRM works), falling back to bundled Chromium
+- **DevTools from the terminal** — network log / request blocking / response mocking / HAR recording / console / DOM inspection
+- **Proxy profiles** — save `host:port` (+auth) as named profiles, switch instantly without restarting the browser, route specific hosts through specific proxies (FoxyProxy-style rules), SOCKS5 auth handled by the built-in relay
+- **Headed ⇄ headless** — switch modes; tabs and cookies survive
+- **Human-in-the-loop** — the agent automates, you take over for logins/CAPTCHAs, `kb wait` detects when you're done
+- **MCP server** — `kb-mcp` exposes 18 tools (screenshots are returned as images)
+- **`--json` everywhere** — machine-readable output for scripting and agents
+
+## Install
 
 ```bash
 npm install
 npm run build
-npm link        # kb / kb-mcp をグローバルに
+npm link        # makes kb / kb-mcp available globally
 ```
 
-ブラウザ実体はインストール済みの Chrome → Edge → Playwright 同梱 Chromium の順で自動選択されます(同梱版を使う場合のみ `npx playwright install chromium`)。
+The browser binary is auto-selected: installed Chrome → Edge → Playwright's bundled Chromium (run `npx playwright install chromium` only if you need the bundled one).
 
-## クイックスタート
+## Quick start
 
 ```bash
-kb open example.com        # デーモン(ブラウザ)が自動起動して開く
-kb text                    # 本文をテキストで読む
-kb screenshot -o s.png     # スクリーンショット
-kb daemon stop             # ブラウザごと終了
+kb open example.com        # daemon (browser) auto-starts
+kb text                    # read the page as text
+kb screenshot -o s.png
+kb daemon stop             # quit the browser
 ```
 
-デフォルトは headed(ウィンドウ表示)。Cookie・ログイン状態は `~/.kb/profiles/` に永続化されます。
+Headed (visible window) by default. Cookies and login state persist under `~/.kb/profiles/`.
 
-## コマンド一覧
+## Commands
 
-| 分類 | コマンド |
+| Category | Commands |
 |---|---|
-| デーモン | `kb daemon start [--headless] / stop / status` |
-| ページ | `kb open <url> [-n]` / `kb tabs [close/switch <id>]` / `kb text` / `kb html` / `kb screenshot [-f]` |
-| 操作 | `kb click <sel>` / `kb fill <sel> <val>` / `kb press <key>` / `kb eval <js>` |
-| Cookie | `kb cookies [list/set/clear]` |
+| Daemon | `kb daemon start [--headless] / stop / status` |
+| Pages | `kb open <url> [-n]` / `kb tabs [close/switch <id>]` / `kb text` / `kb html` / `kb screenshot [-f]` |
+| Interaction | `kb click <sel>` / `kb fill <sel> <val>` / `kb press <key>` / `kb eval <js>` |
+| Cookies | `kb cookies [list/set/clear]` |
 | Network | `kb net log [-f] [--filter re]` / `kb net block <glob>` / `kb net mock <glob> --body f` / `kb net har start/stop` |
 | Console | `kb console [-f]` |
 | DOM | `kb dom query <sel> [--html] [--attr name]` |
-| プロキシ | `kb proxy add/rm/list/use/off/test` / `kb proxy rule add/rm/list` |
-| モード | `kb mode headed\|headless`(タブ・Cookie は復元) |
-| 待機 | `kb wait [--url <glob>] [--selector <sel>]` |
-| エミュレーション | `kb emulate ua/viewport/tz/geo/reset` |
+| Proxy | `kb proxy add/rm/list/use/off/test` / `kb proxy rule add/rm/list` |
+| Mode | `kb mode headed\|headless` (tabs & cookies restored) |
+| Waiting | `kb wait [--url <glob>] [--selector <sel>]` |
+| Emulation | `kb emulate ua/viewport/tz/geo/reset` |
 
-全コマンド `--json` で機械可読出力。
+All commands support `--json`.
 
-## プロキシプロファイル (FoxyProxy 風)
+## Proxy profiles (FoxyProxy-style)
 
 ```bash
 kb proxy add work --type http --host 10.0.0.1 --port 8080 --user u --pass p --bypass "*.internal"
-kb proxy use work                              # ブラウザ無再起動で即時切替
-kb proxy rule add "*.corp.example.com" work    # このホストだけ work 経由(先勝ち)
-kb proxy test                                  # 外部 IP と応答時間で疎通確認
+kb proxy use work                              # applied instantly, no browser restart
+kb proxy rule add "*.corp.example.com" work    # route only this host through work (first match wins)
+kb proxy test                                  # verify via external IP + latency
 ```
 
-仕組み: Chromium は常にデーモン内のローカル中継プロキシを向き、上流だけを差し替えます。このため再起動不要で、Chromium が非対応の SOCKS5 認証も中継層が代行します。
+How it works: Chromium always points at a local relay proxy inside the daemon; switching only swaps the relay's upstream. That's why no restart is needed, and why SOCKS5 authentication (which Chromium doesn't support natively) works — the relay handles it.
 
-## AI エージェントから使う
+## Driving it from an AI agent
 
-**Bash 経由**: 各コマンドはデーモン常駐のため数十 ms で返ります。`kb text` で読み、`kb screenshot` で見て、`kb click / fill` で操作するループ。
+**Via Bash**: commands return fast thanks to the resident daemon. Read with `kb text`, look with `kb screenshot`, act with `kb click / fill`.
 
-**MCP 経由**:
+**Via MCP**:
 
 ```bash
 claude mcp add kb -- kb-mcp
 ```
 
-`kb_open` `kb_text` `kb_screenshot`(画像で返る)`kb_eval` `kb_click` `kb_net_log` `kb_proxy_use` など 18 ツールを公開。
+Exposes `kb_open`, `kb_text`, `kb_screenshot` (returns an image), `kb_eval`, `kb_click`, `kb_net_log`, `kb_proxy_use`, and more — 18 tools.
 
-**手動介入との連携**: ログインや CAPTCHA はユーザーがウィンドウで直接操作し、エージェントは `kb wait --url "**dashboard**"` で完了を検知して再開できます。
+**Human-in-the-loop**: for logins or CAPTCHAs, the user just uses the window directly; the agent resumes after `kb wait --url "**dashboard**"` succeeds.
 
-## アーキテクチャ
+## Architecture
 
 ```
-kb (CLI) ──HTTP+token──▶ デーモン ── Playwright persistent context ──▶ Chrome/Edge/Chromium
-kb-mcp (MCP stdio) ──┘      └─ ローカル中継プロキシ ──▶ 上流プロキシ (profiles/rules)
+kb (CLI) ──HTTP+token──▶ daemon ── Playwright persistent context ──▶ Chrome/Edge/Chromium
+kb-mcp (MCP stdio) ──┘      └─ local relay proxy ──▶ upstream proxies (profiles/rules)
 ```
 
-状態は `~/.kb/`(daemon.json / proxies.json / profiles/ / daemon.log)。
+State lives in `~/.kb/` (daemon.json / proxies.json / profiles/ / daemon.log).
 
 ## License
 
