@@ -85,9 +85,14 @@ function maskValue(name: string, value: string, o: MaskOptions): string {
   return o.mask ? MASK : value;
 }
 
-/** URL のクエリ値のうち機微キー(password / token 等)のものをマスクする。 */
-export function maskUrl(url: string, o: MaskOptions): string {
-  if (!o.mask && !o.deny) return url;
+/**
+ * URL のクエリ値のうち機微キー(password / token 等)のものをマスクする。
+ * クエリ値自体が URL の場合(リダイレクト先の ?next=https%3A%2F%2F… など)は
+ * 内側のクエリにも再帰適用する。
+ * 既知の限界: キー名のないパスセグメント(/verify/<値> 等)は検出できない。
+ */
+export function maskUrl(url: string, o: MaskOptions, depth = 0): string {
+  if ((!o.mask && !o.deny) || depth > 4) return url;
   try {
     const u = new URL(url);
     let changed = false;
@@ -97,6 +102,13 @@ export function maskUrl(url: string, o: MaskOptions): string {
       if (sensitive && v !== MASK) {
         u.searchParams.set(k, MASK);
         changed = true;
+      } else if (/^https?:\/\//i.test(v)) {
+        // 入れ子 URL(percent-encode されていても searchParams がデコード済みの値をくれる)
+        const inner = maskUrl(v, o, depth + 1);
+        if (inner !== v) {
+          u.searchParams.set(k, inner);
+          changed = true;
+        }
       }
     }
     return changed ? u.toString() : url;
@@ -217,6 +229,21 @@ export function redactEvent(event: OpEvent, o: MaskOptions): OpEvent {
   }
   // URL を持つ引数はクエリ値をマスクする(open / request など)
   if (typeof args.url === 'string') args.url = maskUrl(args.url, o);
+  // 結果 payload の url も同様にマスクする(open / click 等の {"url":…,"title":…}。request は上で処理済み)
+  if (e.cmd !== 'request' && e.result != null && (o.mask || o.deny)) {
+    try {
+      const parsed = JSON.parse(e.result) as Record<string, unknown>;
+      if (parsed && typeof parsed === 'object' && typeof parsed.url === 'string') {
+        const masked = maskUrl(parsed.url, o);
+        if (masked !== parsed.url) {
+          parsed.url = masked;
+          e.result = JSON.stringify(parsed);
+        }
+      }
+    } catch {
+      /* JSON でない・切り詰め済みの結果はそのまま(url を含まない) */
+    }
+  }
   // deny はコマンドイベントの全文字列引数にも適用する
   if (o.deny) {
     for (const [k, v] of Object.entries(args)) {
@@ -348,7 +375,7 @@ export function toCliString(e: CommandEvent): string {
     case 'net.mock':
       return `kb net mock ${q(a.pattern)} --status ${a.status}${a.body ? ` --text ${q(clipStr(String(a.body), 100))}` : ''}`;
     case 'net.unroute':
-      return `kb net unroute ${a.id}`;
+      return a.all ? 'kb net unroute --all' : `kb net unroute ${a.id}`;
     default:
       return `kb ${e.cmd.replace('.', ' ')}  # args: ${clipStr(JSON.stringify(e.args), 200)}`;
   }

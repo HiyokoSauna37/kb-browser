@@ -82,7 +82,7 @@ function fmtTabs(list: any[]): string {
 program
   .name('kb')
   .description('CLI-operable browser (Playwright + Chromium)')
-  .version('0.6.0')
+  .version('0.6.1')
   .option('--json', 'JSON 形式で出力する')
   .hook('preAction', (cmd) => {
     jsonOutput = !!cmd.optsWithGlobals().json;

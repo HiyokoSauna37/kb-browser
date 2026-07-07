@@ -14,7 +14,7 @@ import { loadProxyConfig, saveProxyConfig } from './shared/proxyStore';
  * 登録例: claude mcp add kb -- kb-mcp
  */
 
-const server = new McpServer({ name: 'kb-browser', version: '0.6.0' });
+const server = new McpServer({ name: 'kb-browser', version: '0.6.1' });
 
 type ToolResult = {
   content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[];

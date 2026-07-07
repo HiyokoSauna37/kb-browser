@@ -165,6 +165,8 @@ kb-log-<session>/
 
 Caveats: `eval` expressions and `net mock --text` arguments are recorded verbatim (masking targets values, not the code you wrote) — use `--deny <regex>` before sharing if you inlined secrets. The **raw journal keeps sensitive values in plaintext**, so always share via export. Old sessions are pruned automatically at daemon start (default: keep 20, configurable via `KB_LOG_KEEP`).
 
+Known limit: values embedded in **URL path segments** (`/verify/<value>` — no key name to detect) are not auto-masked (nested URLs in query strings *are* masked recursively). Use `--deny <regex>` for those.
+
 Sessions split automatically per daemon run, or explicitly with `kb log start --name <n>` (add `--shots` to auto-capture a screenshot after every action — they show up in report.md). Use `kb log show` for recent events and `kb log steps` for a numbered reproduction script.
 
 Recorded operations can be **replayed as-is**:
@@ -174,6 +176,8 @@ kb log replay              # re-run the latest session's actions in order (tab i
 kb log replay mysession --dry-run          # preview what would run
 kb log replay mysession --from 5 --continue-on-error
 ```
+
+Because replay remaps tab ids to the current active tab, **recordings spanning multiple tabs may not reproduce exactly** (single-tab flows are the target).
 
 ## Proxy profiles (FoxyProxy-style)
 
