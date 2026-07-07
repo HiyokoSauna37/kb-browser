@@ -5,17 +5,23 @@ import { once } from 'node:events';
 import { SocksClient } from 'socks';
 import { DIRECT, type ProxyProfile } from '../shared/proxyStore';
 
+/** 上流(プロキシ/接続先)への接続タイムアウト。死んだプロキシでブラウザが固まるのを防ぐ。 */
+const CONNECT_TIMEOUT_MS = 10_000;
+
 /**
  * ローカル中継プロキシ。
  * Chromium は常にこの中継 (127.0.0.1:port) を向き、上流だけを差し替えることで
  * ブラウザ無再起動のプロキシ切替を実現する。SOCKS5 認証の代行もここで行う。
+ * setAuth() を呼ぶと Proxy-Authorization (Basic) を要求し、他ローカルプロセスの相乗りを防ぐ。
  */
 export class RelayProxy {
   private server = http.createServer();
   private upstreamName = 'direct';
   private upstream: ProxyProfile = DIRECT;
   private rules: { pattern: string; name: string; profile: ProxyProfile }[] = [];
-  private stats = { tunnels: 0, requests: 0, errors: 0 };
+  private stats = { tunnels: 0, requests: 0, errors: 0, authRejects: 0 };
+  /** 期待する Proxy-Authorization ヘッダ値。null なら認証なし。 */
+  private expectedAuth: string | null = null;
 
   setUpstream(name: string, profile: ProxyProfile): void {
     this.upstreamName = name;
@@ -27,9 +33,15 @@ export class RelayProxy {
     this.rules = rules;
   }
 
+  /** 中継プロキシ自体の認証を有効化する(ブラウザ以外のローカルプロセスからの相乗り防止)。 */
+  setAuth(username: string, password: string): void {
+    this.expectedAuth = basicAuth({ username, password });
+  }
+
   status() {
     return {
       active: this.upstreamName,
+      auth: this.expectedAuth != null,
       rules: this.rules.map((r) => ({ pattern: r.pattern, profile: r.name })),
       ...this.stats,
     };
@@ -37,10 +49,17 @@ export class RelayProxy {
 
   async start(): Promise<number> {
     this.server.on('connect', (req, clientSocket, head) => {
+      // ブラウザ側の切断(407 後のリセット等)で unhandled 'error' にならないよう先に握っておく
+      (clientSocket as net.Socket).on('error', () => {});
       void this.handleConnect(req, clientSocket as net.Socket, head);
     });
     this.server.on('request', (req, res) => {
+      req.on('error', () => {});
+      res.on('error', () => {});
       void this.handleRequest(req, res);
+    });
+    this.server.on('clientError', (_err, socket) => {
+      socket.destroy();
     });
     return new Promise((resolve, reject) => {
       this.server.once('error', reject);
@@ -54,6 +73,11 @@ export class RelayProxy {
 
   async stop(): Promise<void> {
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+
+  private authOk(req: http.IncomingMessage): boolean {
+    if (!this.expectedAuth) return true;
+    return req.headers['proxy-authorization'] === this.expectedAuth;
   }
 
   /**
@@ -75,6 +99,13 @@ export class RelayProxy {
   // ---- HTTPS (CONNECT トンネル) ----
 
   private async handleConnect(req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer): Promise<void> {
+    if (!this.authOk(req)) {
+      this.stats.authRejects++;
+      clientSocket.end(
+        'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="kb-relay"\r\nConnection: close\r\n\r\n',
+      );
+      return;
+    }
     this.stats.tunnels++;
     const { host, port } = splitHostPort(req.url ?? '', 443);
     try {
@@ -94,6 +125,11 @@ export class RelayProxy {
   // ---- 平文 HTTP (絶対 URI 形式) ----
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!this.authOk(req)) {
+      this.stats.authRejects++;
+      res.writeHead(407, { 'Proxy-Authenticate': 'Basic realm="kb-relay"' });
+      return void res.end();
+    }
     this.stats.requests++;
     let url: URL;
     try {
@@ -106,6 +142,8 @@ export class RelayProxy {
     const profile = this.effectiveProfile(url.hostname);
     const headers = { ...req.headers };
     delete headers['proxy-connection'];
+    // 中継自体の認証情報を上流へ漏らさない
+    delete headers['proxy-authorization'];
 
     let options: http.RequestOptions;
     if (profile.type === 'http') {
@@ -134,6 +172,7 @@ export class RelayProxy {
       res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
       upstreamRes.pipe(res);
     });
+    upstreamReq.setTimeout(CONNECT_TIMEOUT_MS, () => upstreamReq.destroy(new Error('upstream timeout')));
     upstreamReq.on('error', () => {
       this.stats.errors++;
       if (!res.headersSent) res.writeHead(502);
@@ -147,18 +186,14 @@ export class RelayProxy {
   /** profile 経由で host:port への生 TCP ソケットを確立する。 */
   async connectVia(profile: ProxyProfile, host: string, port: number): Promise<net.Socket> {
     switch (profile.type) {
-      case 'direct': {
-        const socket = net.connect(port, host);
-        await once(socket, 'connect');
-        return socket;
-      }
+      case 'direct':
+        return connectTcp(port, host, CONNECT_TIMEOUT_MS);
       case 'http': {
-        const socket = net.connect(profile.port, profile.host);
-        await once(socket, 'connect');
-        let header = `CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n`;
+        const socket = await connectTcp(profile.port, profile.host, CONNECT_TIMEOUT_MS);
+        let header = `CONNECT ${hostHeader(host)}:${port} HTTP/1.1\r\nHost: ${hostHeader(host)}:${port}\r\n`;
         if (profile.username) header += `Proxy-Authorization: ${basicAuth(profile)}\r\n`;
         socket.write(header + '\r\n');
-        await readConnectResponse(socket);
+        await readConnectResponse(socket, CONNECT_TIMEOUT_MS);
         return socket;
       }
       case 'socks5': {
@@ -172,6 +207,7 @@ export class RelayProxy {
           },
           command: 'connect',
           destination: { host, port },
+          timeout: CONNECT_TIMEOUT_MS,
         });
         return socket;
       }
@@ -199,13 +235,48 @@ export class RelayProxy {
 
 // ---- helpers ----
 
+/** タイムアウト付き TCP 接続。 */
+function connectTcp(port: number, host: string, timeoutMs: number): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, host);
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`接続がタイムアウトしました: ${host}:${port}`));
+    }, timeoutMs);
+    socket.once('connect', () => {
+      clearTimeout(timer);
+      resolve(socket);
+    });
+    socket.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+/** IPv6 リテラルは CONNECT 行や Host ヘッダで [] 付きにする。 */
+function hostHeader(host: string): string {
+  return host.includes(':') ? `[${host}]` : host;
+}
+
 function basicAuth(p: { username?: string; password?: string }): string {
   return 'Basic ' + Buffer.from(`${p.username ?? ''}:${p.password ?? ''}`).toString('base64');
 }
 
-function splitHostPort(input: string, defaultPort: number): { host: string; port: number } {
+/** "host:port" を分解する。"[::1]:443" 形式の IPv6 リテラルにも対応。 */
+export function splitHostPort(input: string, defaultPort: number): { host: string; port: number } {
+  if (input.startsWith('[')) {
+    const end = input.indexOf(']');
+    if (end > 0) {
+      const host = input.slice(1, end);
+      const rest = input.slice(end + 1);
+      const port = rest.startsWith(':') ? Number(rest.slice(1)) || defaultPort : defaultPort;
+      return { host, port };
+    }
+  }
   const idx = input.lastIndexOf(':');
-  if (idx < 0) return { host: input, port: defaultPort };
+  // ':' がない、または複数ある(裸の IPv6)場合は全体をホストとして扱う
+  if (idx < 0 || input.indexOf(':') !== idx) return { host: input, port: defaultPort };
   return { host: input.slice(0, idx), port: Number(input.slice(idx + 1)) || defaultPort };
 }
 
@@ -225,9 +296,15 @@ function escapeRegex(s: string): string {
 }
 
 /** CONNECT のレスポンスヘッダを読み、200 を確認する。ヘッダ後の余剰データは socket に戻す。 */
-function readConnectResponse(socket: net.Socket): Promise<void> {
+export function readConnectResponse(socket: net.Socket, timeoutMs = CONNECT_TIMEOUT_MS): Promise<void> {
   return new Promise((resolve, reject) => {
     let buffer = Buffer.alloc(0);
+    const timer = setTimeout(() => fail(new Error('CONNECT レスポンスがタイムアウトしました')), timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off('data', onData);
+      socket.off('error', fail);
+    };
     const onData = (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
       const headerEnd = buffer.indexOf('\r\n\r\n');
@@ -235,8 +312,7 @@ function readConnectResponse(socket: net.Socket): Promise<void> {
         if (buffer.length > 16 * 1024) fail(new Error('CONNECT レスポンスが大きすぎます'));
         return;
       }
-      socket.off('data', onData);
-      socket.off('error', fail);
+      cleanup();
       const header = buffer.subarray(0, headerEnd).toString('utf8');
       const rest = buffer.subarray(headerEnd + 4);
       if (rest.length) socket.unshift(rest);
@@ -244,7 +320,7 @@ function readConnectResponse(socket: net.Socket): Promise<void> {
       else reject(new Error(`上流プロキシが CONNECT を拒否しました: ${header.split('\r\n')[0]}`));
     };
     const fail = (err: Error) => {
-      socket.off('data', onData);
+      cleanup();
       socket.destroy();
       reject(err);
     };

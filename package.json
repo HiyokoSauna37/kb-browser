@@ -1,6 +1,6 @@
 {
   "name": "kb-browser",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "CLI-operable browser built on Playwright + Chromium (CDP)",
   "license": "MIT",
   "bin": {
@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
+    "test": "tsc && node --test \"dist/**/*.test.js\"",
     "kb": "node dist/cli.js"
   },
   "engines": {

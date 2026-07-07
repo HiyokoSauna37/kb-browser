@@ -7,8 +7,9 @@ import { loadProxyConfig, resolveProfile } from '../shared/proxyStore';
 import {
   DAEMON_LOG_PATH,
   ensureKbHome,
-  removeDaemonInfo,
+  removeDaemonInfoIfOwned,
   writeDaemonInfo,
+  writeLastRun,
 } from '../shared/paths';
 
 interface RpcRequest {
@@ -23,6 +24,12 @@ function log(message: string): void {
   } catch {
     /* logging must never kill the daemon */
   }
+}
+
+function tokenMatches(given: unknown, expected: string): boolean {
+  const a = Buffer.from(String(given ?? ''));
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 async function main(): Promise<void> {
@@ -41,7 +48,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log(`shutdown: ${reason}`);
-    removeDaemonInfo();
+    removeDaemonInfoIfOwned(process.pid);
     await host.stop();
     await relay.stop();
     server.close();
@@ -57,7 +64,7 @@ async function main(): Promise<void> {
       res.end(JSON.stringify(body));
     };
 
-    if (req.headers['x-kb-token'] !== token) {
+    if (!tokenMatches(req.headers['x-kb-token'], token)) {
       return respond(401, { ok: false, error: 'unauthorized' });
     }
     if (req.method !== 'POST' || req.url !== '/rpc') {
@@ -83,6 +90,14 @@ async function main(): Promise<void> {
     }
   });
 
+  /** click / fill 等の操作対象 (selector / ref / frame / tab) を組み立てる。 */
+  const target = (args: Record<string, any>) => ({
+    selector: args.selector,
+    ref: args.ref,
+    frame: args.frame,
+    tab: args.tab,
+  });
+
   async function dispatch({ cmd, args }: RpcRequest): Promise<unknown> {
     switch (cmd) {
       case 'daemon.status':
@@ -103,7 +118,7 @@ async function main(): Promise<void> {
         return { profile: name, ...result };
       }
       case 'open':
-        return host.open(args.url, !!args.new, args.tab);
+        return host.open(args.url, !!args.new, args.tab, args.waitUntil);
       case 'tabs.list':
         return host.listTabs();
       case 'tabs.close':
@@ -111,27 +126,77 @@ async function main(): Promise<void> {
       case 'tabs.activate':
         return host.activateTab(args.tab);
       case 'screenshot':
-        return host.screenshot(args.path, !!args.full, args.tab);
+        return host.screenshot(
+          args.path,
+          { full: !!args.full, selector: args.selector, ref: args.ref, frame: args.frame, timeoutMs: args.timeoutMs },
+          args.tab,
+        );
       case 'text':
-        return host.text(args.tab);
+        return host.text(args.tab, { maxChars: args.maxChars, offset: args.offset });
       case 'html':
-        return host.html(args.tab);
+        return host.html(args.tab, { maxChars: args.maxChars, offset: args.offset });
+      case 'snapshot':
+        return host.snapshot(args.tab, { maxChars: args.maxChars, offset: args.offset });
       case 'eval':
-        return host.eval(args.expression, args.tab);
+        return host.eval(args.expression, args.tab, { maxChars: args.maxChars, offset: args.offset });
       case 'click':
-        return host.click(args.selector, args.tab);
+        return host.click(target(args));
       case 'fill':
-        return host.fill(args.selector, args.value, args.tab);
+        return host.fill(target(args), args.value);
       case 'press':
         return host.press(args.key, args.tab);
+      case 'hover':
+        return host.hover(target(args));
+      case 'check':
+        return host.setChecked(target(args), args.checked !== false);
+      case 'select':
+        return host.select(target(args), args.values ?? [], !!args.byLabel);
+      case 'upload':
+        return host.upload(target(args), args.files ?? []);
+      case 'scroll':
+        return host.scroll({ by: args.by, to: args.to, top: args.top, bottom: args.bottom }, args.tab);
+      case 'back':
+        return host.goBack(args.tab);
+      case 'forward':
+        return host.goForward(args.tab);
+      case 'reload':
+        return host.reload(args.tab);
+      case 'pdf':
+        return host.pdf(args.path, args.tab);
+      case 'downloads.list':
+        return host.listDownloads();
+      case 'downloads.clear':
+        return host.clearDownloads();
       case 'cookies.list':
         return host.cookies(args.domain);
       case 'cookies.set':
         return host.setCookie(args.cookie);
+      case 'cookies.rm':
+        return host.removeCookie(args.name, args.domain);
       case 'cookies.clear':
         return host.clearCookies();
+      case 'cookies.import':
+        return host.importCookies(args.cookies ?? []);
+      case 'storage.dump':
+        return host.storageDump();
+      case 'storage.restore':
+        return host.storageRestore(args.state ?? {});
       case 'net.log':
         return host.netLogQuery(args);
+      case 'net.body':
+        return host.netBody(args.seq, { maxChars: args.maxChars, offset: args.offset });
+      case 'request':
+        return host.httpRequest({
+          url: args.url,
+          method: args.method,
+          headers: args.headers,
+          data: args.data,
+          timeoutMs: args.timeoutMs,
+          follow: args.follow,
+          savePath: args.savePath,
+          maxChars: args.maxChars,
+          offset: args.offset,
+        });
       case 'net.clear':
         return host.netClear();
       case 'net.block':
@@ -156,15 +221,32 @@ async function main(): Promise<void> {
         return host.domQuery(args.selector, args, args.tab);
       case 'mode.set': {
         const result = await host.setMode(!!args.headless);
+        writeLastRun({ headless: host.headless, profile: host.profile });
         log(`mode switched: headless=${result.headless} (restored ${result.restoredTabs} tabs)`);
         return result;
       }
+      case 'profile.set': {
+        const result = await host.setProfile(args.name);
+        writeLastRun({ headless: host.headless, profile: host.profile });
+        log(`profile switched: ${result.profile} (restored ${result.restoredTabs} tabs)`);
+        return result;
+      }
+      case 'auth.set': {
+        const result = await host.setAuth(args.credentials ?? null);
+        log(`http credentials ${result.auth ? 'set' : 'cleared'}`);
+        return result;
+      }
       case 'wait':
-        return host.waitFor({ url: args.url, selector: args.selector, timeoutMs: args.timeoutMs ?? 120_000 }, args.tab);
+        return host.waitFor(
+          { url: args.url, selector: args.selector, idle: !!args.idle, any: !!args.any, timeoutMs: args.timeoutMs ?? 120_000 },
+          args.tab,
+        );
       case 'emulate':
         return host.emulate(args, args.tab);
       case 'emulate.geo':
         return host.setGeolocation(args.latitude, args.longitude);
+      case 'emulate.net':
+        return host.emulateNetwork(args.preset, args.tab);
       default:
         throw new Error(`unknown command: ${cmd}`);
     }
@@ -191,10 +273,23 @@ async function main(): Promise<void> {
   }
 
   applyProxyConfig();
+
+  // 中継プロキシ自体にも認証をかけ、他ローカルプロセスの相乗り(認証代行の悪用)を防ぐ。
+  // KB_RELAY_NOAUTH=1 で無効化できる(トラブルシュート用)。
+  const relayAuth = process.env.KB_RELAY_NOAUTH
+    ? null
+    : { username: 'kb', password: crypto.randomBytes(12).toString('hex') };
+  if (relayAuth) relay.setAuth(relayAuth.username, relayAuth.password);
+
   const relayPort = await relay.start();
 
-  log(`starting (headless=${headless}, profile=${profile}, proxy=${relay.status().active}, relayPort=${relayPort})`);
-  await host.start({ headless, profile, proxyServer: `http://127.0.0.1:${relayPort}` });
+  log(`starting (headless=${headless}, profile=${profile}, proxy=${relay.status().active}, relayPort=${relayPort}, relayAuth=${!!relayAuth})`);
+  await host.start({
+    headless,
+    profile,
+    proxy: { server: `http://127.0.0.1:${relayPort}`, ...(relayAuth ?? {}) },
+  });
+  writeLastRun({ headless, profile });
 
   server.listen(0, '127.0.0.1', () => {
     const address = server.address();
@@ -202,16 +297,30 @@ async function main(): Promise<void> {
       log('failed to get listen address');
       process.exit(1);
     }
-    writeDaemonInfo({ port: address.port, token, pid: process.pid });
+    let buildId: number | undefined;
+    try {
+      buildId = Math.floor(fs.statSync(__filename).mtimeMs);
+    } catch {
+      /* buildId は警告用の補助情報にすぎない */
+    }
+    writeDaemonInfo({ port: address.port, token, pid: process.pid, buildId });
     log(`listening on 127.0.0.1:${address.port} (pid=${process.pid}, channel=${host.channel})`);
   });
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+  // ソケットの散発的なエラー等でデーモン(=ブラウザセッション)を道連れにしない
+  process.on('uncaughtException', (err) => {
+    log(`uncaughtException: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  });
+  process.on('unhandledRejection', (reason) => {
+    log(`unhandledRejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`);
+  });
 }
 
 main().catch((err) => {
   log(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-  removeDaemonInfo();
+  removeDaemonInfoIfOwned(process.pid);
   process.exit(1);
 });
