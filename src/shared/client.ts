@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -118,15 +118,16 @@ export function releaseSpawnLock(): void {
  */
 export function spawnDaemon(
   opts: { headless?: boolean; profile?: string; channel?: string; userAgent?: string; cdpUrl?: string } = {},
-): void {
+): ChildProcess | null {
   const last = readLastRun();
   const merged = {
     headless: opts.headless ?? last?.headless ?? false,
     profile: opts.profile ?? last?.profile ?? 'default',
-    channel: opts.channel ?? last?.channel,
-    userAgent: opts.userAgent ?? last?.userAgent,
+    // "auto" / 空文字は「明示的に既定へ戻す」= last-run を継承しない
+    channel: opts.channel === 'auto' ? undefined : (opts.channel ?? last?.channel),
+    userAgent: opts.userAgent === '' ? undefined : (opts.userAgent ?? last?.userAgent),
   };
-  if (!acquireSpawnLock()) return;
+  if (!acquireSpawnLock()) return null;
   const daemonJs = path.join(__dirname, '..', 'daemon', 'main.js');
   const args = [daemonJs];
   if (merged.headless) args.push('--headless');
@@ -141,6 +142,7 @@ export function spawnDaemon(
     windowsHide: true,
   });
   child.unref();
+  return child;
 }
 
 function daemonLogTail(lines = 12): string {
@@ -152,7 +154,16 @@ function daemonLogTail(lines = 12): string {
   }
 }
 
-export async function waitForDaemon(): Promise<DaemonInfo> {
+/**
+ * デーモンの起動完了を待つ。spawn した child を渡すと、起動前に子プロセスが
+ * 死んだ時点で(30 秒待たずに)デーモンログ付きの即時エラーになる
+ * (--cdp の接続失敗などを無言のタイムアウトにしないため)。
+ */
+export async function waitForDaemon(child?: ChildProcess | null): Promise<DaemonInfo> {
+  let childExited = false;
+  child?.once('exit', () => {
+    childExited = true;
+  });
   const deadline = Date.now() + 30_000; // 初回はブラウザ起動が遅いことがある
   while (Date.now() < deadline) {
     await sleep(300);
@@ -162,19 +173,31 @@ export async function waitForDaemon(): Promise<DaemonInfo> {
     } catch {
       /* 起動待ちの間は無応答を許容してポーリングを続ける */
     }
+    if (childExited) {
+      throw new Error(
+        `デーモンが起動直後に終了しました。デーモンログの末尾:\n${daemonLogTail()}\n(全文: ${DAEMON_LOG_PATH})`,
+      );
+    }
   }
   throw new Error(
     `デーモンの起動がタイムアウトしました。デーモンログの末尾:\n${daemonLogTail()}\n(全文: ${DAEMON_LOG_PATH})`,
   );
 }
 
-/** デーモンに RPC を送る。未起動なら自動起動して待つ。 */
+/** デーモンに RPC を送る。未起動なら自動起動して待つ(内容を stderr に通知する)。 */
 export async function rpc(cmd: string, args: Record<string, unknown> = {}): Promise<any> {
   let info = await pingDaemon();
   if (!info) {
     try {
-      spawnDaemon();
-      info = await waitForDaemon();
+      const child = spawnDaemon();
+      info = await waitForDaemon(child);
+      // 「アタッチしていたつもりが素のブラウザ」等に気付けるよう、何が起動したかを通知する
+      const status = await rpcRaw(info, 'daemon.status').catch(() => null);
+      if (status) {
+        console.error(
+          `kb: デーモンを自動起動しました (headless=${status.headless}, profile=${status.profile}, channel=${status.channel})`,
+        );
+      }
     } finally {
       releaseSpawnLock();
     }

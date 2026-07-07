@@ -57,9 +57,9 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 | Login | `kb login [url] [--until <glob>] [--save <file>]` (manual sign-in → state auto-saved to the profile) |
 | Cookies / session | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump/restore` |
 | Downloads | `kb downloads [list/clear]` (auto-saved under `~/.kb/downloads/`) |
-| Network | `kb net log [-f] [--filter re]` / `kb net body <seq>` (response body) / `kb net headers <seq>` (full headers) / `kb net block <glob>` / `kb net mock <glob> [--body f\|--text s] [--status n]` / `kb net har start/stop` |
+| Network | `kb net log [-f] [--filter re] [--responses]` / `kb net body <seq>` (response body) / `kb net headers <seq>` (full headers) / `kb net block <glob>` / `kb net mock <glob> [--body f\|--text s] [--status n]` / `kb net unroute <id>\|--all` / `kb net har start/stop` |
 | Console | `kb console [-f]` |
-| Recording | `kb log [list]` / `kb log start [--name n] / stop / status` / `kb log show/steps [--no-mask]` / `kb log export [-o dir]` / `kb log rm <n>` |
+| Recording | `kb log [list]` / `kb log start [--name n] [--shots] / stop / status` / `kb log show/steps [--no-mask]` / `kb log export [-o dir]` / `kb log replay [n] [--dry-run]` / `kb log rm <n>` |
 | DOM | `kb dom query <sel> [--html] [--attr name] [--frame <sel>]` (falls back to same-name DOM property — value / checked etc. — when the attribute is absent) |
 | Proxy | `kb proxy add/rm/list/use/off/status/test` / `kb proxy rule add/rm/list` |
 | Mode / profile | `kb mode headed\|headless` / `kb profile list/use <n>` (tabs & cookies restored) |
@@ -161,9 +161,19 @@ kb-log-<session>/
 └─ meta.json      # session info
 ```
 
-**Sensitive values are masked by default** (`«masked»`): fill inputs, eval return values, Authorization / Cookie headers, password / token-like keys in bodies. Unmask with an explicit `--no-mask`; fine-tune with `--allow` / `--deny` (regex). **The local raw journal (`~/.kb/logs/`) is never modified** — masking applies only at export / show time, so reports can be regenerated anytime.
+**Sensitive values are masked by default** (`«masked»`): fill inputs, eval return values, Authorization / Cookie headers, password / token-like keys in bodies, and **sensitive keys in URL query strings** (`?api_key=…`, including Location / Referer headers and URLs inside bodies). Unmask with an explicit `--no-mask`; fine-tune with `--allow` / `--deny` (regex). **The local raw journal (`~/.kb/logs/`) is never modified** — masking applies only at export / show time, so reports can be regenerated anytime.
 
-Sessions split automatically per daemon run, or explicitly with `kb log start --name <n>`. Use `kb log show` for recent events and `kb log steps` for a numbered reproduction script.
+Caveats: `eval` expressions and `net mock --text` arguments are recorded verbatim (masking targets values, not the code you wrote) — use `--deny <regex>` before sharing if you inlined secrets. The **raw journal keeps sensitive values in plaintext**, so always share via export. Old sessions are pruned automatically at daemon start (default: keep 20, configurable via `KB_LOG_KEEP`).
+
+Sessions split automatically per daemon run, or explicitly with `kb log start --name <n>` (add `--shots` to auto-capture a screenshot after every action — they show up in report.md). Use `kb log show` for recent events and `kb log steps` for a numbered reproduction script.
+
+Recorded operations can be **replayed as-is**:
+
+```bash
+kb log replay              # re-run the latest session's actions in order (tab ids map to the active tab)
+kb log replay mysession --dry-run          # preview what would run
+kb log replay mysession --from 5 --continue-on-error
+```
 
 ## Proxy profiles (FoxyProxy-style)
 

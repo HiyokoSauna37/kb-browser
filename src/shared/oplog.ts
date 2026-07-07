@@ -1,3 +1,5 @@
+import { inferJsonContentType } from './util';
+
 /**
  * 操作ログ(kb log)の共有ロジック。すべて純関数。
  * - イベント型(JSONL の 1 行 = 1 イベント)
@@ -21,6 +23,8 @@ export interface CommandEvent extends OpEventBase {
   /** 結果の JSON 要約(500 文字で切り詰め)。 */
   result?: string;
   error?: string;
+  /** --shots 有効時の操作直後スクリーンショット(セッションフォルダ相対パス)。 */
+  shot?: string;
 }
 
 /** 発生した通信(xhr / fetch / document / other のみ)。 */
@@ -81,12 +85,39 @@ function maskValue(name: string, value: string, o: MaskOptions): string {
   return o.mask ? MASK : value;
 }
 
-/** ヘッダのマスク: 既定は機微なヘッダのみ。deny は全ヘッダの名前・値に適用。 */
+/** URL のクエリ値のうち機微キー(password / token 等)のものをマスクする。 */
+export function maskUrl(url: string, o: MaskOptions): string {
+  if (!o.mask && !o.deny) return url;
+  try {
+    const u = new URL(url);
+    let changed = false;
+    for (const [k, v] of [...u.searchParams.entries()]) {
+      if (o.allow?.test(k)) continue;
+      const sensitive = (o.mask && SENSITIVE_KEY_RE.test(k)) || o.deny?.test(k) || o.deny?.test(v);
+      if (sensitive && v !== MASK) {
+        u.searchParams.set(k, MASK);
+        changed = true;
+      }
+    }
+    return changed ? u.toString() : url;
+  } catch {
+    return url;
+  }
+}
+
+/** テキスト中に現れる URL のクエリ値をマスクする(Location / Referer ヘッダや本文中の URL 用)。 */
+export function maskUrlsInText(text: string, o: MaskOptions): string {
+  if (!o.mask && !o.deny) return text;
+  return text.replace(/https?:\/\/[^\s"'<>\\)\]}]+/g, (m) => maskUrl(m, o));
+}
+
+/** ヘッダのマスク: 既定は機微なヘッダのみ。deny は全ヘッダの名前・値に適用。URL を運ぶヘッダはクエリ値もマスク。 */
 function redactHeaders(headers: Record<string, string>, o: MaskOptions): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(headers)) {
     if (SENSITIVE_HEADER_RE.test(name)) out[name] = maskValue(name, value, o);
     else if (o.deny && (o.deny.test(name) || o.deny.test(value))) out[name] = MASK;
+    else if (/^(location|referer|refresh)$/i.test(name)) out[name] = maskUrlsInText(value, o);
     else out[name] = value;
   }
   return out;
@@ -135,12 +166,14 @@ export function maskBody(data: string, o: MaskOptions): string {
 export function redactEvent(event: OpEvent, o: MaskOptions): OpEvent {
   const e = JSON.parse(JSON.stringify(event)) as OpEvent;
   if (e.type === 'net') {
+    e.url = maskUrl(e.url, o);
     if (e.requestHeaders) e.requestHeaders = redactHeaders(e.requestHeaders, o);
-    if (e.postData != null) e.postData = maskBody(e.postData, o);
+    if (e.postData != null) e.postData = maskUrlsInText(maskBody(e.postData, o), o);
     return e;
   }
   if (e.type === 'console') {
     if (o.deny?.test(e.text)) e.text = MASK;
+    else e.text = maskUrlsInText(e.text, o);
     return e;
   }
   const args = e.args as Record<string, any>;
@@ -170,8 +203,9 @@ export function redactEvent(event: OpEvent, o: MaskOptions): OpEvent {
         try {
           const parsed = JSON.parse(e.result) as Record<string, any>;
           if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.url === 'string') parsed.url = maskUrl(parsed.url, o);
             if (parsed.headers) parsed.headers = redactHeaders(parsed.headers, o);
-            if (typeof parsed.body === 'string') parsed.body = maskBody(parsed.body, o);
+            if (typeof parsed.body === 'string') parsed.body = maskUrlsInText(maskBody(parsed.body, o), o);
             e.result = JSON.stringify(parsed);
           }
         } catch {
@@ -181,6 +215,8 @@ export function redactEvent(event: OpEvent, o: MaskOptions): OpEvent {
       }
       break;
   }
+  // URL を持つ引数はクエリ値をマスクする(open / request など)
+  if (typeof args.url === 'string') args.url = maskUrl(args.url, o);
   // deny はコマンドイベントの全文字列引数にも適用する
   if (o.deny) {
     for (const [k, v] of Object.entries(args)) {
@@ -251,7 +287,8 @@ export function toCliString(e: CommandEvent): string {
     case 'check':
       return `kb ${a.checked === false ? 'uncheck' : 'check'}${targetOpts(a)}`;
     case 'select':
-      return `kb select${targetOpts(a)} ${(a.values ?? []).map(q).join(' ')}${a.byLabel ? ' --label' : ''}`;
+      // --label は値の前に置く(値の後ろだとフラグに値が続くように見えて紛らわしい)
+      return `kb select${targetOpts(a)}${a.byLabel ? ' --label' : ''} ${(a.values ?? []).map(q).join(' ')}`;
     case 'upload':
       return `kb upload${targetOpts(a)} ${(a.files ?? []).map(q).join(' ')}`;
     case 'scroll':
@@ -329,7 +366,12 @@ export function toCurlCommand(e: NetEvent): string {
     if (k.startsWith(':') || CURL_SKIP_HEADER_RE.test(k)) continue;
     lines.push(`-H ${q(`${k}: ${v}`)}`);
   }
-  if (e.postData != null && e.postData !== '') lines.push(`--data ${q(e.postData)}`);
+  if (e.postData != null && e.postData !== '') {
+    // Content-Type が記録されていない JSON ボディは補完する(curl 既定の form-urlencoded で再実行されるのを防ぐ)
+    const inferred = inferJsonContentType(e.postData, e.requestHeaders);
+    if (inferred) lines.push(`-H ${q(`content-type: ${inferred}`)}`);
+    lines.push(`--data ${q(e.postData)}`);
+  }
   return lines.join(' \\\n  ');
 }
 

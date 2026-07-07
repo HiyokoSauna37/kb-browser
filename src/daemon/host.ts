@@ -841,7 +841,7 @@ export class BrowserHost {
 
   // ---- ネットワーク監視・改変 (DevTools Network 相当) ----
 
-  netLogQuery(opts: { tab?: number; since?: number; filter?: string; limit?: number }): {
+  netLogQuery(opts: { tab?: number; since?: number; filter?: string; limit?: number; responsesOnly?: boolean }): {
     entries: NetEntry[];
     seq: number;
     dropped: number;
@@ -850,7 +850,11 @@ export class BrowserHost {
     return this.netLog.query({
       since: opts.since,
       limit: opts.limit,
-      filter: (e) => (opts.tab == null || e.tab === opts.tab) && (re == null || re.test(e.url)),
+      filter: (e) =>
+        (opts.tab == null || e.tab === opts.tab) &&
+        (re == null || re.test(e.url)) &&
+        // --responses: 送信相 (request) を省き、完了相 (response / requestfailed) の 1 行だけにする
+        (!opts.responsesOnly || e.event !== 'request'),
     });
   }
 
@@ -883,6 +887,13 @@ export class BrowserHost {
     if (!rule) throw new Error(`ルール ${id} は存在しません。kb net rules で確認してください。`);
     await this.context.unroute(rule.pattern, rule.handler);
     this.routes.delete(id);
+  }
+
+  async removeAllRoutes(): Promise<{ removed: number }> {
+    const n = this.routes.size;
+    for (const rule of this.routes.values()) await this.context.unroute(rule.pattern, rule.handler);
+    this.routes.clear();
+    return { removed: n };
   }
 
   /**

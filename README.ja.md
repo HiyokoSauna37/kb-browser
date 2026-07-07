@@ -57,9 +57,9 @@ kb daemon stop             # ブラウザごと終了
 | ログイン | `kb login [url] [--until <glob>] [--save <file>]`(手動サインイン → 状態はプロファイルに自動保存) |
 | Cookie / セッション | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump/restore` |
 | ダウンロード | `kb downloads [list/clear]`(`~/.kb/downloads/` に自動保存) |
-| Network | `kb net log [-f] [--filter re]` / `kb net body <seq>`(レスポンス本文)/ `kb net headers <seq>`(全ヘッダ)/ `kb net block <glob>` / `kb net mock <glob> [--body f\|--text s] [--status n]` / `kb net har start/stop` |
+| Network | `kb net log [-f] [--filter re] [--responses]` / `kb net body <seq>`(レスポンス本文)/ `kb net headers <seq>`(全ヘッダ)/ `kb net block <glob>` / `kb net mock <glob> [--body f\|--text s] [--status n]` / `kb net unroute <id>\|--all` / `kb net har start/stop` |
 | Console | `kb console [-f]` |
-| 操作記録 | `kb log [list]` / `kb log start [--name n] / stop / status` / `kb log show/steps [--no-mask]` / `kb log export [-o dir]` / `kb log rm <n>` |
+| 操作記録 | `kb log [list]` / `kb log start [--name n] [--shots] / stop / status` / `kb log show/steps [--no-mask]` / `kb log export [-o dir]` / `kb log replay [n] [--dry-run]` / `kb log rm <n>` |
 | DOM | `kb dom query <sel> [--html] [--attr name] [--frame <sel>]`(属性がなければ value/checked 等の同名プロパティにフォールバック) |
 | プロキシ | `kb proxy add/rm/list/use/off/status/test` / `kb proxy rule add/rm/list` |
 | モード / プロファイル | `kb mode headed\|headless` / `kb profile list/use <n>`(タブ・Cookie は復元) |
@@ -161,9 +161,19 @@ kb-log-<session>/
 └─ meta.json      # セッション情報
 ```
 
-**機微な値は既定でマスク**されます(`«masked»`): 入力値(fill)、eval の戻り値、Authorization / Cookie 等のヘッダ、ボディ内の password / token 系キー。解除は明示 `--no-mask`、微調整は `--allow` / `--deny`(正規表現)。**手元の生ジャーナル(`~/.kb/logs/`)は無改変**で、マスクは export / show 時にだけ適用されます — レポートはいつでも再生成できます。
+**機微な値は既定でマスク**されます(`«masked»`): 入力値(fill)、eval の戻り値、Authorization / Cookie 等のヘッダ、ボディ内の password / token 系キー、**URL クエリの機微キー**(`?api_key=…` 等。Location / Referer ヘッダや本文中の URL も対象)。解除は明示 `--no-mask`、微調整は `--allow` / `--deny`(正規表現)。**手元の生ジャーナル(`~/.kb/logs/`)は無改変**で、マスクは export / show 時にだけ適用されます — レポートはいつでも再生成できます。
 
-セッションはデーモンの起動ごとに自動分割され、`kb log start --name <n>` で明示的に区切ることもできます。`kb log show` で直近イベント、`kb log steps` で番号付き再現手順を確認できます。
+注意: `eval` の式や `net mock --text` の引数は「あなたが書いたコード」として逐語記録されます(マスクは値に対して働く)。引数に機微な値を直書きした場合は `--deny <regex>` で潰してから共有してください。また**生ジャーナルには機微な値が平文で残る**ため、共有には必ず export を使ってください。古いセッションはデーモン起動時に自動削除されます(既定: 直近 20。`KB_LOG_KEEP` で変更)。
+
+セッションはデーモンの起動ごとに自動分割され、`kb log start --name <n>` で明示的に区切ることもできます(`--shots` を付けると操作のたびに自動スクリーンショットが記録され、report.md に載ります)。`kb log show` で直近イベント、`kb log steps` で番号付き再現手順を確認できます。
+
+記録した操作は**そのまま再実行**できます:
+
+```bash
+kb log replay              # 最新セッションの操作を順に再実行(タブ指定はアクティブタブに読み替え)
+kb log replay mysession --dry-run          # 何が実行されるかだけ確認
+kb log replay mysession --from 5 --continue-on-error
+```
 
 ## プロキシプロファイル (FoxyProxy 風)
 

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   MASK,
   maskBody,
+  maskUrl,
+  maskUrlsInText,
   redactEvent,
   reportMarkdown,
   requestFiles,
@@ -104,6 +106,36 @@ test('maskBody: form-urlencoded は機微キーのペアだけマスク', () => 
   assert.equal(masked, `user=alice&password=${MASK}&keep=1`);
 });
 
+test('maskUrl: クエリの機微キーだけマスクされ、他は保持', () => {
+  const masked = maskUrl('https://api.example.com/v1/data?user=alice&api_key=sk123&page=2', M);
+  const u = new URL(masked);
+  assert.equal(u.searchParams.get('api_key'), MASK);
+  assert.equal(u.searchParams.get('user'), 'alice');
+  assert.equal(u.searchParams.get('page'), '2');
+});
+
+test('maskUrl: --no-mask では deny 指定分だけマスク', () => {
+  const url = 'https://a/b?token=t1&keep=1';
+  assert.equal(maskUrl(url, NO_M), url);
+  const denied = maskUrl('https://a/b?foo=SECRETVAL&keep=1', { mask: false, deny: /SECRETVAL/ });
+  assert.equal(new URL(denied).searchParams.get('foo'), MASK);
+});
+
+test('maskUrlsInText: 本文・ヘッダ内の URL のクエリ値もマスクされる', () => {
+  const text = 'redirect to https://app.example.com/cb?code=abc&session_token=xyz please';
+  const masked = maskUrlsInText(text, M);
+  assert.match(masked, /session_token=%C2%ABmasked%C2%BB|session_token=«masked»/);
+  assert.match(masked, /code=abc/);
+});
+
+test('redactEvent: net.url と open の args.url のクエリ値がマスクされる', () => {
+  const n = redactEvent(netEvent({ url: 'https://a/b?apikey=k1&q=1' }), M) as NetEvent;
+  assert.match(n.url, /apikey=/);
+  assert.doesNotMatch(n.url, /k1/);
+  const c = redactEvent(cmdEvent('open', { url: 'https://a/b?password=p1' }), M) as CommandEvent;
+  assert.doesNotMatch(String(c.args.url), /p1/);
+});
+
 test('summarizeArgs: storage.restore の state は件数に置き換わる', () => {
   const out = summarizeArgs('storage.restore', { state: { cookies: [1, 2], origins: [] } });
   assert.deepEqual(out.state, { cookies: 2, origins: 0 });
@@ -114,6 +146,20 @@ test('toCliString: 主要コマンドが再現可能な形になる', () => {
   assert.equal(toCliString(cmdEvent('click', { ref: 'e12' })), 'kb click --ref e12');
   assert.equal(toCliString(cmdEvent('fill', { selector: '#q', value: 'hello world' })), "kb fill #q 'hello world'");
   assert.equal(toCliString(cmdEvent('request', { url: 'https://a/b', method: 'POST', data: '{"a":1}' })), `kb request https://a/b -X POST -d '{"a":1}'`);
+});
+
+test('toCurlCommand: Content-Type 未記録の JSON ボディは application/json を補完', () => {
+  const curl = toCurlCommand(netEvent({ requestHeaders: {}, postData: '{"a":1}' }));
+  assert.match(curl, /-H 'content-type: application\/json'/);
+  const withCt = toCurlCommand(netEvent({ requestHeaders: { 'content-type': 'text/plain' }, postData: '{"a":1}' }));
+  assert.doesNotMatch(withCt, /application\/json/);
+});
+
+test('toCliString: select は --label が値の前に出る', () => {
+  assert.equal(
+    toCliString(cmdEvent('select', { selector: '#dropdown', values: ['Option 2'], byLabel: true })),
+    "kb select #dropdown --label 'Option 2'",
+  );
 });
 
 test('toCurlCommand: ノイズヘッダを除き、ボディとカスタムヘッダを含む', () => {

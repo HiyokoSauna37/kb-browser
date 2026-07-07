@@ -2,7 +2,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { BrowserHost } from './host';
-import { Journal } from './journal';
+import { Journal, pruneLogSessions } from './journal';
 import { RelayProxy } from './relay';
 import { loadProxyConfig, resolveProfile } from '../shared/proxyStore';
 import { clipStr, summarizeArgs } from '../shared/oplog';
@@ -62,8 +62,14 @@ async function main(): Promise<void> {
     'log.start', 'log.stop', 'log.status',
   ]);
 
+  /** 自動スクリーンショット(kb log start --shots)の対象になる操作コマンド。 */
+  const AUTO_SHOT_CMDS = new Set([
+    'open', 'click', 'fill', 'press', 'hover', 'check', 'select', 'upload', 'scroll',
+    'back', 'forward', 'reload',
+  ]);
+
   /** RPC 1 回分をジャーナルへ記録する。 */
-  function journalCommand(rpc: RpcRequest, ok: boolean, durationMs: number, result?: unknown, error?: string): void {
+  function journalCommand(rpc: RpcRequest, ok: boolean, durationMs: number, result?: unknown, error?: string, shot?: string): void {
     if (JOURNAL_EXCLUDE.has(rpc.cmd)) return;
     const summary = result === undefined ? undefined : clipStr(JSON.stringify(result) ?? '', 500);
     journal.append({
@@ -74,7 +80,21 @@ async function main(): Promise<void> {
       durationMs,
       ...(summary !== undefined ? { result: summary } : {}),
       ...(error !== undefined ? { error } : {}),
+      ...(shot !== undefined ? { shot } : {}),
     });
+  }
+
+  /** --shots 有効時、操作直後の画面をセッションフォルダに保存する(失敗しても操作は成功扱い)。 */
+  async function autoShot(rpc: RpcRequest): Promise<string | undefined> {
+    if (!journal.autoShots || !AUTO_SHOT_CMDS.has(rpc.cmd)) return undefined;
+    const dest = journal.nextShotPath();
+    if (!dest) return undefined;
+    try {
+      await host.screenshot(dest.abs, {}, rpc.args?.tab);
+      return dest.rel;
+    } catch {
+      return undefined;
+    }
   }
 
   const shutdown = async (reason: string) => {
@@ -118,7 +138,8 @@ async function main(): Promise<void> {
     const startedMs = Date.now();
     try {
       const result = await dispatch(rpc);
-      journalCommand(rpc, true, Date.now() - startedMs, result);
+      const shot = await autoShot(rpc);
+      journalCommand(rpc, true, Date.now() - startedMs, result, undefined, shot);
       respond(200, { ok: true, result });
       if (rpc.cmd === 'daemon.stop') void shutdown('stop command');
     } catch (err) {
@@ -226,7 +247,7 @@ async function main(): Promise<void> {
       case 'net.headers':
         return host.netHeadersQuery(args.seq);
       case 'log.start':
-        return journal.start(args.name, sessionMeta());
+        return journal.start(args.name, sessionMeta(), { shots: !!args.shots });
       case 'log.stop':
         return journal.stop();
       case 'log.status':
@@ -252,7 +273,7 @@ async function main(): Promise<void> {
       case 'net.rules':
         return host.listRoutes();
       case 'net.unroute':
-        return host.removeRoute(args.id);
+        return args.all ? host.removeAllRoutes() : host.removeRoute(args.id);
       case 'net.har.start':
         return host.harStart();
       case 'net.har.stop':
@@ -352,8 +373,13 @@ async function main(): Promise<void> {
     headless: host.headless,
     channel: host.channel,
     ...(cdpUrl ? { attach: cdpUrl } : {}),
-    kbVersion: '0.5.0',
+    kbVersion: '0.6.0',
   });
+
+  // 生ジャーナルには機微な値が平文で残るため、古いセッションは自動削除する(既定: 直近 20)
+  const keep = Number(process.env.KB_LOG_KEEP ?? 20);
+  const { pruned } = pruneLogSessions(Number.isFinite(keep) ? keep : 20);
+  if (pruned.length) log(`journal pruned: ${pruned.length} old session(s) removed`);
 
   // 操作ログは既定で常時 ON(セッション = デーモンの一生。kb log start --name で明示分割できる)
   host.onJournalNet = (ev) => journal.append({ type: 'net', ...ev });

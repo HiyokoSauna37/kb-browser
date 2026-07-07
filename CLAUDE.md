@@ -16,13 +16,13 @@ kb <cmd>               # npm link 済み(グローバル)。開発中は node di
 
 - `src/cli.ts` — CLI クライアント (commander)。全コマンド `--json` 対応(成功 `{ok:true,result}` / 失敗 `{ok:false,error}`)。
 - `src/mcp.ts` — MCP stdio サーバ (`kb-mcp`)。デーモンの機能を 23 ツールとして公開。`claude mcp add kb -- kb-mcp` で登録。**SDK の zod ジェネリクスは tsc をメモリ爆発させるため、型消去した `tool()` ラッパ経由で登録している(server.tool を直接呼ばないこと)。**
-- `src/shared/client.ts` — デーモンへの RPC クライアント(CLI / MCP 共用)。未起動時は自動 spawn(前回の headless/profile を last-run.json から引き継ぎ、spawn ロックで二重起動を防止)。pid 生存確認付きの stale 判定。**明示的な `kb daemon start` はフラグなし = headed**(last-run 継承は自動 spawn のみ)。
+- `src/shared/client.ts` — デーモンへの RPC クライアント(CLI / MCP 共用)。未起動時は自動 spawn(前回の headless/profile/channel/ua を last-run.json から引き継ぎ、spawn ロックで二重起動を防止。**起動内容を stderr に 1 行通知**)。pid 生存確認付きの stale 判定。**明示的な `kb daemon start` はフラグなし = headed**(last-run 継承は自動 spawn のみ)。`waitForDaemon(child)` は spawn 直後の子プロセス死亡を検知して 30 秒待たずに daemon.log 付きで即エラー(--cdp 接続失敗などの fail-fast)。`--ua ""` / `--channel auto` は last-run 継承をクリアする明示リセット。
 - `src/shared/util.ts` — 純粋関数(normalizeUrl / clip / LogBuffer / prepareEval)。テスト対象。**prepareEval は eval コードの自動 async ラップ**(await 入りの式・複数文を async IIFE 化し、最後の式を構文チェック付きで return に書き換える)。
 - `src/daemon/main.ts` — HTTP サーバ (127.0.0.1 ランダムポート + timing-safe トークン認証)。RPC を host にディスパッチ。uncaughtException でデーモンを落とさない。
 - `src/daemon/host.ts` — BrowserHost。`launchPersistentContext` で Chromium を保持、タブを ID 管理。channel は chrome → msedge → 同梱 chromium の順にフォールバック(`--channel` 明示時はフォールバックせず strict)。`--ua` で context 全体の UA 上書き。mode/profile/auth 切替は共通の `restart()` でタブ URL を復元。**アタッチモード**(`--cdp <url>` → `connectOverCDP`)では既存ブラウザの既定 context に接続する: stop は `browser.close()` で切断のみ(対象ブラウザは殺さない)、mode/profile/auth と proxy 切替は `assertNotAttached()` でエラー、last-run に cdp は残さない(自動 spawn は常に通常起動)。Chrome 136+ は既定プロファイルで CDP 不可(専用 --user-data-dir 必須)。
 - `src/daemon/relay.ts` — ローカル中継プロキシ。Chromium は常にここを向き、上流(http/socks5/direct)だけ差し替えることで**無再起動のプロキシ切替**を実現。SOCKS5 認証代行・bypass パターン・接続タイムアウト(10s)もこの層。**中継自体もセッション毎トークンの Basic 認証**で他ローカルプロセスの相乗りを防ぐ(KB_RELAY_NOAUTH=1 で無効化)。
-- `src/shared/oplog.ts` — 操作ログの純関数層(イベント型 / マスキング / report.md / steps / curl 生成)。テスト対象。**マスクは export/show 時のみ適用し、生ジャーナルは無改変**が原則。fill 値・eval 戻り値・機微ヘッダ・ボディ内の password/token 系キー・request の結果要約(set-cookie / 反射トークン)を既定マスク。
-- `src/daemon/journal.ts` — セッション別ジャーナル。`~/.kb/logs/<session>/events.jsonl` + meta.json に逐次追記。デーモン起動で自動開始(既定常時 ON)。main.ts が dispatch をラップして command イベントを記録(JOURNAL_EXCLUDE で読み取り系を除外)、host のフック(onJournalNet / onJournalConsole)が通信(xhr/fetch/document/other、allHeaders+postData 付き)とコンソールを記録。
+- `src/shared/oplog.ts` — 操作ログの純関数層(イベント型 / マスキング / report.md / steps / curl 生成)。テスト対象。**マスクは export/show 時のみ適用し、生ジャーナルは無改変**が原則。fill 値・eval 戻り値・機微ヘッダ・ボディ内の password/token 系キー・**URL クエリの機微キー**(net.url / args.url / Location・Referer ヘッダ / 本文中の URL)・request の結果要約(set-cookie / 反射トークン)を既定マスク。curl 生成は Content-Type 未記録の JSON ボディに application/json を補完する。
+- `src/daemon/journal.ts` — セッション別ジャーナル。`~/.kb/logs/<session>/events.jsonl` + meta.json に逐次追記。デーモン起動で自動開始(既定常時 ON)+ **古いセッションを prune**(既定 直近 20、KB_LOG_KEEP で変更)。main.ts が dispatch をラップして command イベントを記録(JOURNAL_EXCLUDE で読み取り系を除外)、host のフック(onJournalNet / onJournalConsole)が通信(xhr/fetch/document/other、allHeaders+postData 付き)とコンソールを記録。`kb log start --shots` で操作(AUTO_SHOT_CMDS)直後の自動スクショを `shots/auto-N.png` に保存しイベントの `shot` に紐付け。`kb log replay` は生ジャーナルの command イベント(REPLAY_CMDS、tab 指定はアクティブタブに読み替え)を順に RPC 再実行する。
 - `src/shared/paths.ts` — `~/.kb/` 配下のパス定義と daemon.json / last-run.json の読み書き。
 - `src/shared/proxyStore.ts` — proxies.json(プロファイル + active)の読み書き。
 
@@ -81,12 +81,12 @@ kb emulate ua "<UA>" / viewport 390x844 [--dpr 3 --mobile] / tz America/New_York
 ## DevTools 系コマンド
 
 ```bash
-kb net log [--filter <regex>] [-f] [-n 50]   # Network タブ相当。行頭に #seq。-f で追従(取りこぼしは件数表示)
+kb net log [--filter <regex>] [--responses] [-f] [-n 50]   # Network タブ相当。行頭に #seq。--responses で完了相のみ。-f で追従
 kb net body <seq>                             # 捕捉済みレスポンス本文(seq は net log の行頭番号)
 kb net headers <seq>                          # 全リクエスト/レスポンスヘッダ(allHeaders、直近 2000 件。relay の内部認証ヘッダは除去)
 kb net block "*://*.doubleclick.net/*"        # glob パターンで遮断
 kb net mock "*://api.example/**" [--body mock.json | --text '{"error":1}'] [--status 500]   # 既存エンドポイントのエラー差し替えにも使える(本文省略可)
-kb net rules / kb net unroute <id>
+kb net rules / kb net unroute <id> | --all
 kb net har start / stop -o out.har            # HAR 記録(本文含む、256KB/エントリ上限。二重 start はエラー)
 kb console [-f] [--clear]                     # console.log / pageerror
 kb dom query "h1" [--html] [--attr href] [--frame iframe]
@@ -123,7 +123,7 @@ node dist/cli.js daemon stop     # ブラウザごと終了
 
 ## ロードマップ
 
-docs/requirements.md 参照。M1(骨格)/ M2(プロキシプロファイル)/ M3(DevTools 系)/ M4(モード切替・wait・エミュレーション)/ M5(振り分けルール・MCP・npm link 配布)/ M6(エージェント最適化: snapshot+ref、出力上限、堅牢化、セッション保存、ダウンロード、PDF 他)/ M7(利用者フィードバック反映: `kb net body`・`kb request`・`kb login`・screenshot `--timeout`、2026-07)/ M8(第 2 次フィードバック: CDP アタッチ・`--channel`/`--ua`・`kb net headers`・mock 拡張・JSON 推定・relay エラー可視化、2026-07)/ M9(操作記録: `kb log` ジャーナル・レポート・マスク付き export バンドル・curl 単体再実行。仕様は ../kb-feature-request.md P8 + ../operation-log.md、replay のみ未実装、2026-07)完了。
+docs/requirements.md 参照。M1(骨格)/ M2(プロキシプロファイル)/ M3(DevTools 系)/ M4(モード切替・wait・エミュレーション)/ M5(振り分けルール・MCP・npm link 配布)/ M6(エージェント最適化: snapshot+ref、出力上限、堅牢化、セッション保存、ダウンロード、PDF 他)/ M7(利用者フィードバック反映: `kb net body`・`kb request`・`kb login`・screenshot `--timeout`、2026-07)/ M8(第 2 次フィードバック: CDP アタッチ・`--channel`/`--ua`・`kb net headers`・mock 拡張・JSON 推定・relay エラー可視化、2026-07)/ M9(操作記録: `kb log` ジャーナル・レポート・マスク付き export バンドル・curl 単体再実行。仕様は ../kb-feature-request.md P8 + ../operation-log.md、2026-07)/ M10(v0.5.0 検証フィードバック対応: cdp fail-fast・自動起動通知・URL クエリマスク・`--ua ""`/`--channel auto` リセット・`unroute --all`・ログ prune・`log replay`・`--shots`・`net log --responses`。../kb-v0.5.0-feedback.md 参照、2026-07)完了。
 
 単一バイナリ(exe)化は見送り: Playwright はブラウザ実体とドライバ資産をディスク上に必要とするため bundler と相性が悪い。配布は npm パッケージ(`npm link` / `npm pack`)を正とする。
 
@@ -137,5 +137,6 @@ docs/requirements.md 参照。M1(骨格)/ M2(プロキシプロファイル)/ M3
 - `kb net body` の捕捉対象はテキスト系の xhr/fetch/document/other のみで、256KB/件で truncate(HAR も同様にテキスト系・256KB 以下のみ本文を含める)。バイナリや 256KB 超の全文は `kb request -o <file>` で取り直すのが唯一の経路。
 - storage restore の localStorage 復元はオリジンごとに一時ページを開く方式(遷移不可のオリジンはスキップされる)。
 - 複数サインインセッションの同時併用(要望 P5)は未対応。persistent context は 1 プロセス 1 context のため、現状は `KB_HOME` を分けた 2 デーモン併走が回避策(docs 記載済み)。対応するならマルチ BrowserHost 化の大改修になる。
-- 操作ログの `kb log replay`(operation-log.md の M5)は未実装。steps.md(kb コマンド列)と requests/(curl)が再現手段としてあるため優先度低と判断。
+- `kb log replay` は生ジャーナルの成功コマンドのみ再実行し、tab 指定をアクティブタブに読み替える(マルチタブの並行操作の忠実な再現は非対応)。summarizeArgs で 2000 文字超に切り詰められた引数(巨大 eval 等)は再実行が壊れる。
+- CLI 出力は日英混在(操作結果の一部が英語)。i18n 統一は見送り中。
 - 操作ログの通信記録は xhr/fetch/document/other のみ(画像・静的アセットは対象外)。`kb request` は command イベントとして記録され、requests/ の curl にも含まれる(context.request はページイベントに乗らないため net イベントにはならない)。
