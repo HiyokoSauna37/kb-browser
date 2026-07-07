@@ -6,10 +6,14 @@
 
 Everything a GUI browser gives you — page rendering, cookie management, DevTools operations (Network / Console / Elements) — is available as `kb` commands. FoxyProxy-style proxy profiles are built in, with **restart-free switching** and per-host routing rules. Designed to be driven by AI agents (Claude Code, etc.) via Bash or MCP, while the window is a real Chrome you can use by hand at any time.
 
+> **Two workflows it's built for:**
+> - **Drive it from an AI agent** — Claude Code and other agents operate kb over **MCP (23 tools)** or **Bash** (every command supports `--json`). The accessibility-snapshot + `--ref` loop is tuned for reliable, low-token automation, and the resident daemon returns each step in tens of milliseconds.
+> - **Security research & bug-bounty recon** (authorized testing only) — session-shared HTTP, live network inspection/mocking, raw `eval` on authenticated SPAs, proxy chaining into Burp/Caido, two-account IDOR via profiles, and masked, shareable evidence bundles. See [Security research & bug-bounty recon](#security-research--bug-bounty-recon).
+
 ## Features
 
 - **Daemon architecture** — the browser stays resident; every CLI command returns in tens of milliseconds
-- **Real Chrome** — uses your installed Chrome/Edge (DRM works), falling back to bundled Chromium; pick explicitly with `--channel`, override the User-Agent with `--ua`
+- **Real Chrome** — uses your installed Chrome/Edge (DRM works), falling back to bundled Chromium; pick explicitly with `--channel`, override the User-Agent with `--ua`, or present as a regular (non-automation) browser with `--stealth` for authorized testing
 - **Attach to a running browser** — `kb daemon start --cdp http://127.0.0.1:9222` connects to a Chrome/Edge started with `--remote-debugging-port` and reuses its signed-in state
 - **Agent-optimized** — `kb snapshot` returns an accessibility tree with element refs; `kb click --ref e12` acts on them reliably (including inside iframes), and stale refs are **auto re-resolved** to the element with the same role/name after re-renders. Long outputs (text / html / snapshot) are capped at 20,000 chars by default with `--offset` paging. `kb eval` accepts `await` and multi-line code as-is
 - **DevTools from the terminal** — network log / response bodies (`kb net body`) / full headers (`kb net headers`) / request blocking / response mocking (including overriding live endpoints with error responses) / HAR recording / console / DOM inspection
@@ -49,7 +53,7 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 
 | Category | Commands |
 |---|---|
-| Daemon | `kb daemon start [--headless] [--profile <n>] [--channel chrome\|msedge\|chromium] [--ua <s>] [--cdp <url>] / stop / status` |
+| Daemon | `kb daemon start [--headless] [--profile <n>] [--channel chrome\|msedge\|chromium] [--ua <s>] [--stealth] [--cdp <url>] / stop / status` |
 | Pages | `kb open <url> [-n] [--wait idle]` / `kb tabs [close/switch <id>]` / `kb text` / `kb html` / `kb snapshot` / `kb screenshot [<sel>\|--ref e12] [-f] [--timeout <sec>]` (element-level supported) / `kb pdf` (headless only) |
 | Navigation | `kb back` / `kb forward` / `kb reload` / `kb scroll [--to <sel>/--bottom]` |
 | Interaction | `kb click` / `kb fill` / `kb select [--label]` / `kb check` / `kb uncheck` / `kb hover` / `kb upload <sel> <local file path...>` / `kb press <key>` / `kb eval <js> [--file f.js]` (`await` & multi-line OK; returns the last expression) — target via CSS selector, `--ref e12` (from snapshot), or `--frame <sel>` (inside iframe) |
@@ -236,6 +240,20 @@ kb click "role=button[name='Save']"        # role + accessible name
 With refs, a ref that went stale after a re-render is auto re-resolved to the element with the same role/name, so you only re-snapshot on failure.
 
 **Human-in-the-loop**: for logins or CAPTCHAs, the user just uses the window directly; the agent resumes after `kb wait --url "**dashboard**"` succeeds. The initial sign-in flow is packaged as `kb login`.
+
+## Security research & bug-bounty recon
+
+kb is a capable driver for **authorized** security testing and bug-bounty reconnaissance — all from the commands documented above:
+
+- **Authenticated API testing / IDOR** — `kb request` shares the browser's cookies and proxy, so you probe authz-protected endpoints as the logged-in user; run two accounts side by side with separate profiles (or two daemons via `KB_HOME`) to diff object access.
+- **Runtime recon on SPAs** — `kb eval` runs arbitrary JS in the page context and returns raw values (cookies, tokens, client-side route tables) without redaction — handy for confirming DOM XSS or extracting client config.
+- **Traffic inspection & tampering** — `kb net log / body / headers` reads captured requests and responses; `kb net mock / block` rewrites them in place to probe error handling and client-side trust.
+- **Proxy chaining** — point kb's upstream at Burp or Caido and route all traffic through your intercepting proxy, switchable without a restart.
+- **Attach to a real signed-in session** — `--cdp` reuses a Chrome you signed into by hand (SSO / 2FA / passkey), so real-auth targets work without re-login.
+- **Reproducible evidence** — `kb log export` produces a **secret-masked** bundle (report + steps + standalone curl + screenshots) you can attach to a report.
+- **Agent-driven, headless** — sub-agents can run recon in parallel against the resident daemon.
+
+> **Test only what you're authorized to.** Follow each program's rules of engagement — many bug-bounty programs prohibit automated scanning, aggressive request rates, or evading their anti-bot / WAF controls. kb is a driver, not a licence: confirm scope and policy first.
 
 ## Architecture
 
