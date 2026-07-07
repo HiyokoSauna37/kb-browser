@@ -14,6 +14,9 @@ export const PROFILES_DIR = path.join(KB_HOME, 'profiles');
 /** ダウンロードファイルの保存先。 */
 export const DOWNLOADS_DIR = path.join(KB_HOME, 'downloads');
 
+/** 操作ログ(kb log)のセッション置き場。<session>/events.jsonl + meta.json。 */
+export const LOGS_DIR = path.join(KB_HOME, 'logs');
+
 /** デーモンのログファイル。 */
 export const DAEMON_LOG_PATH = path.join(KB_HOME, 'daemon.log');
 
@@ -34,6 +37,10 @@ export interface DaemonInfo {
 export interface LastRunOptions {
   headless: boolean;
   profile: string;
+  /** 起動チャネルの明示指定 (chrome | msedge | chromium)。未指定は自動選択。 */
+  channel?: 'chrome' | 'msedge' | 'chromium';
+  /** context 全体の User-Agent 上書き。 */
+  userAgent?: string;
 }
 
 export function ensureKbHome(): void {
@@ -76,7 +83,7 @@ export function removeDaemonInfoIfOwned(pid: number): void {
 export function readLastRun(): LastRunOptions | null {
   try {
     const raw = JSON.parse(fs.readFileSync(LAST_RUN_PATH, 'utf8')) as LastRunOptions;
-    return { headless: !!raw.headless, profile: raw.profile || 'default' };
+    return { headless: !!raw.headless, profile: raw.profile || 'default', channel: raw.channel, userAgent: raw.userAgent };
   } catch {
     return null;
   }

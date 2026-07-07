@@ -81,6 +81,26 @@ export function clip(text: string, opts: { maxChars?: number; offset?: number } 
   };
 }
 
+/**
+ * kb request のボディが JSON に見え、かつ Content-Type が未指定なら
+ * "application/json" を返す(明示ヘッダが常に優先)。
+ */
+export function inferJsonContentType(
+  data: string | undefined,
+  headers: Record<string, string> | undefined,
+): string | undefined {
+  if (data == null) return undefined;
+  if (headers && Object.keys(headers).some((k) => k.toLowerCase() === 'content-type')) return undefined;
+  const t = data.trim();
+  if (!t.startsWith('{') && !t.startsWith('[')) return undefined;
+  try {
+    JSON.parse(t);
+    return 'application/json';
+  } catch {
+    return undefined;
+  }
+}
+
 /** "Name: value" 形式のヘッダ指定(-H)をオブジェクトに変換する。 */
 export function parseHeaderArgs(headers: string[]): Record<string, string> {
   const out: Record<string, string> = {};

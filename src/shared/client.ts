@@ -116,17 +116,25 @@ export function releaseSpawnLock(): void {
  * (自動 spawn で default プロファイル・headed に化けるのを防ぐ)。
  * 別プロセスが spawn 中ならスキップして待つだけにする。
  */
-export function spawnDaemon(opts: { headless?: boolean; profile?: string } = {}): void {
+export function spawnDaemon(
+  opts: { headless?: boolean; profile?: string; channel?: string; userAgent?: string; cdpUrl?: string } = {},
+): void {
   const last = readLastRun();
   const merged = {
     headless: opts.headless ?? last?.headless ?? false,
     profile: opts.profile ?? last?.profile ?? 'default',
+    channel: opts.channel ?? last?.channel,
+    userAgent: opts.userAgent ?? last?.userAgent,
   };
   if (!acquireSpawnLock()) return;
   const daemonJs = path.join(__dirname, '..', 'daemon', 'main.js');
   const args = [daemonJs];
   if (merged.headless) args.push('--headless');
   args.push('--profile', merged.profile);
+  if (merged.channel) args.push('--channel', merged.channel);
+  if (merged.userAgent) args.push('--ua', merged.userAgent);
+  // アタッチは明示起動 (kb daemon start --cdp) のみ。last-run からは継承しない
+  if (opts.cdpUrl) args.push('--cdp', opts.cdpUrl);
   const child = spawn(process.execPath, args, {
     detached: true,
     stdio: 'ignore',

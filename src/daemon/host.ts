@@ -2,15 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   chromium,
+  type Browser,
   type BrowserContext,
   type CDPSession,
   type Locator,
   type Page,
+  type Request,
   type Response,
   type Route,
 } from 'playwright';
 import { DOWNLOADS_DIR, PROFILES_DIR } from '../shared/paths';
-import { BodyStore, clip, escapeRegExp, LogBuffer, normalizeUrl, prepareEval } from '../shared/util';
+import { BodyStore, clip, escapeRegExp, inferJsonContentType, LogBuffer, normalizeUrl, prepareEval } from '../shared/util';
 
 export interface HostOptions {
   headless: boolean;
@@ -19,6 +21,12 @@ export interface HostOptions {
   proxy?: { server: string; username?: string; password?: string };
   /** 対象サイトの Basic 認証 (context オプションのため変更には再起動が必要)。 */
   httpCredentials?: { username: string; password: string };
+  /** 起動チャネルの明示指定。省略時は chrome → msedge → 同梱 chromium の順に自動選択。 */
+  channel?: 'chrome' | 'msedge' | 'chromium';
+  /** context 全体の User-Agent 上書き(headless の "HeadlessChrome" 対策など)。 */
+  userAgent?: string;
+  /** 既存ブラウザへのアタッチ (connectOverCDP)。指定時は launch せずこの CDP エンドポイントへ接続する。 */
+  cdpUrl?: string;
 }
 
 export interface TabInfo {
@@ -96,6 +104,8 @@ const NET_BODY_MAX_BYTES = 32 * 1024 * 1024;
 const TEXT_CONTENT_RE = /text|json|javascript|xml|html|css|svg|form-urlencoded/;
 /** 本文を捕捉するリソース種別(API デバッグ用途。画像や大量の静的アセットは対象外)。 */
 const BODY_RESOURCE_TYPES = new Set(['xhr', 'fetch', 'document', 'other']);
+/** 全ヘッダ捕捉の保持件数上限(kb net headers 用。全レスポンスが対象)。 */
+const NET_HEADERS_MAX = 2000;
 /** text / html / snapshot のデフォルト出力上限(コンテキスト溢れ防止)。--max-chars 0 で無制限。 */
 const TEXT_CAP = 20_000;
 /** dom query --html の要素あたり outerHTML 上限。 */
@@ -116,6 +126,10 @@ const NETWORK_PRESETS: Record<string, { offline: boolean; latency: number; downl
  */
 export class BrowserHost {
   private context!: BrowserContext;
+  /** connectOverCDP でアタッチした場合のみ保持(stop 時は切断のみでブラウザを閉じない)。 */
+  private browser: Browser | null = null;
+  /** 既存ブラウザへのアタッチモードか。再起動を伴う操作 (mode/profile/auth) は使えない。 */
+  attached = false;
   private tabs = new Map<number, Page>();
   private nextTabId = 1;
   private activeTabId: number | null = null;
@@ -126,6 +140,8 @@ export class BrowserHost {
     NET_BODY_MAX_COUNT,
     NET_BODY_MAX_BYTES,
   );
+  /** 捕捉した全ヘッダ(kb net headers 用)。キーは response エントリの seq。挿入順で NET_HEADERS_MAX に切り詰め。 */
+  private netHeaders = new Map<number, { request: Record<string, string>; response: Record<string, string> }>();
   private consoleLog = new LogBuffer<ConsoleEntry>(LOG_CAP);
   private routes = new Map<number, RouteRule & { handler: (route: Route) => void }>();
   private nextRouteId = 1;
@@ -148,6 +164,21 @@ export class BrowserHost {
   /** ブラウザウィンドウが(手動含め)完全に閉じられたときに呼ばれる。 */
   onClosed: () => void = () => {};
 
+  /** 操作ジャーナル用フック(main.ts が設定)。xhr/fetch/document/other の通信を全ヘッダ付きで通知する。 */
+  onJournalNet: (ev: {
+    method: string;
+    url: string;
+    status: number;
+    resourceType: string;
+    tab: number;
+    requestHeaders: Record<string, string>;
+    postData?: string;
+    contentType?: string;
+  }) => void = () => {};
+
+  /** 操作ジャーナル用フック(main.ts が設定)。コンソール出力・ページエラーを通知する。 */
+  onJournalConsole: (ev: { kind: string; text: string; tab: number }) => void = () => {};
+
   async start(opts: HostOptions): Promise<void> {
     this.opts = opts;
     await this.launch(opts);
@@ -156,9 +187,29 @@ export class BrowserHost {
   private async launch(opts: HostOptions): Promise<void> {
     this.headless = opts.headless;
     this.profile = opts.profile;
-    const userDataDir = path.join(PROFILES_DIR, opts.profile);
 
-    const candidates: (string | undefined)[] = ['chrome', 'msedge', undefined];
+    if (opts.cdpUrl) {
+      await this.attachOverCdp(opts.cdpUrl);
+    } else {
+      await this.launchOwned(opts);
+    }
+
+    for (const page of this.context.pages()) this.registerTab(page);
+    this.context.on('page', (page) => this.registerTab(page));
+    this.context.on('close', () => {
+      if (!this.restarting) this.onClosed();
+    });
+
+    // block / mock ルールは context 単位なので再起動時に引き継ぐ
+    for (const rule of this.routes.values()) await this.context.route(rule.pattern, rule.handler);
+  }
+
+  /** 自前でブラウザを起動する(通常モード)。channel 明示指定時はフォールバックしない。 */
+  private async launchOwned(opts: HostOptions): Promise<void> {
+    const userDataDir = path.join(PROFILES_DIR, opts.profile);
+    const candidates: (string | undefined)[] = opts.channel
+      ? [opts.channel === 'chromium' ? undefined : opts.channel]
+      : ['chrome', 'msedge', undefined];
     const errors: string[] = [];
     let launched = false;
     for (const channel of candidates) {
@@ -169,6 +220,7 @@ export class BrowserHost {
           viewport: null,
           proxy: opts.proxy,
           httpCredentials: opts.httpCredentials,
+          userAgent: opts.userAgent,
         });
         this.channel = channel ?? 'bundled chromium';
         launched = true;
@@ -185,15 +237,48 @@ export class BrowserHost {
         : 'Chrome/Edge が見つからない場合は "npx playwright install chromium" を実行してください。';
       throw new Error(`ブラウザを起動できません。${hint}\n候補ごとの失敗理由:\n${detail}`);
     }
+  }
 
-    for (const page of this.context.pages()) this.registerTab(page);
-    this.context.on('page', (page) => this.registerTab(page));
-    this.context.on('close', () => {
+  /**
+   * 起動済みブラウザへ connectOverCDP でアタッチする。対象は
+   * `--remote-debugging-port` 付きで起動した Chrome / Edge / Chromium。
+   * proxy / UA / Basic 認証などの起動時オプションは適用できない。
+   */
+  private async attachOverCdp(cdpUrl: string): Promise<void> {
+    let browser: Browser;
+    try {
+      browser = await chromium.connectOverCDP(cdpUrl, { timeout: 15_000 });
+    } catch (err) {
+      throw new Error(
+        `CDP エンドポイント ${cdpUrl} に接続できません。対象ブラウザを --remote-debugging-port 付きで起動してください` +
+          `(例: chrome --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\\kb-attach")。` +
+          `Chrome 136 以降は普段使いの既定プロファイルではリモートデバッグが無効化されているため、専用の --user-data-dir が必要です。\n` +
+          `(${String(err instanceof Error ? err.message : err).split('\n')[0]})`,
+      );
+    }
+    const contexts = browser.contexts();
+    if (!contexts.length) {
+      await browser.close().catch(() => {});
+      throw new Error('アタッチ先にブラウザコンテキストが見つかりません(ウィンドウが 1 つも開いていない可能性があります)');
+    }
+    this.browser = browser;
+    this.attached = true;
+    this.context = contexts[0];
+    this.channel = `cdp:${cdpUrl}`;
+    // ユーザーがブラウザを閉じた/接続が切れたらデーモンも終了する
+    browser.on('disconnected', () => {
       if (!this.restarting) this.onClosed();
     });
+  }
 
-    // block / mock ルールは context 単位なので再起動時に引き継ぐ
-    for (const rule of this.routes.values()) await this.context.route(rule.pattern, rule.handler);
+  /** アタッチモードでは使えない操作のガード。 */
+  private assertNotAttached(op: string): void {
+    if (this.attached) {
+      throw new Error(
+        `アタッチモード (connectOverCDP) では ${op} は使えません(接続先ブラウザの起動条件は kb からは変更できません)。` +
+          `kb daemon stop で切断し、通常モードで起動し直してください。`,
+      );
+    }
   }
 
   /**
@@ -239,6 +324,7 @@ export class BrowserHost {
 
   /** headless ⇄ headed を切り替える(Chromium の制約でブラウザ再起動が必要)。 */
   async setMode(headless: boolean): Promise<{ headless: boolean; restoredTabs: number; tabs: TabInfo[] }> {
+    this.assertNotAttached('mode の切替');
     if (headless === this.headless) return { headless, restoredTabs: 0, tabs: await this.listTabs() };
     const { restoredTabs } = await this.restart({ headless });
     // 再起動でタブ ID が変わるため、呼び出し側が新しい ID を知れるよう一覧を返す
@@ -247,6 +333,7 @@ export class BrowserHost {
 
   /** ブラウザプロファイル(user-data-dir)を切り替える。再起動を伴う。 */
   async setProfile(name: string): Promise<{ profile: string; restoredTabs: number; tabs: TabInfo[] }> {
+    this.assertNotAttached('profile の切替');
     if (!name) throw new Error('プロファイル名を指定してください');
     if (name === this.profile) return { profile: name, restoredTabs: 0, tabs: await this.listTabs() };
     const { restoredTabs } = await this.restart({ profile: name });
@@ -257,13 +344,17 @@ export class BrowserHost {
   async setAuth(
     credentials: { username: string; password: string } | null,
   ): Promise<{ auth: boolean; restoredTabs: number; tabs: TabInfo[] }> {
+    this.assertNotAttached('auth の設定');
     const { restoredTabs } = await this.restart({ httpCredentials: credentials ?? undefined });
     return { auth: credentials != null, restoredTabs, tabs: await this.listTabs() };
   }
 
   async stop(): Promise<void> {
     try {
-      await this.context?.close();
+      // アタッチモードでは切断のみ(ユーザーのブラウザは閉じない)。connectOverCDP の
+      // browser.close() はプロセスを殺さず接続を切るだけ。
+      if (this.attached) await this.browser?.close();
+      else await this.context?.close();
     } catch {
       /* already closed */
     }
@@ -302,6 +393,7 @@ export class BrowserHost {
       });
       if (this.har) void this.captureHarEntry(res);
       void this.captureNetBody(entry.seq, res, req.resourceType());
+      void this.captureNetHeaders(entry.seq, req, res, id);
     });
     page.on('requestfailed', (req) =>
       this.netLog.push({
@@ -314,12 +406,14 @@ export class BrowserHost {
         failure: req.failure()?.errorText,
       }),
     );
-    page.on('console', (msg) =>
-      this.consoleLog.push({ ts: new Date().toISOString(), tab: id, kind: msg.type(), text: msg.text() }),
-    );
-    page.on('pageerror', (err) =>
-      this.consoleLog.push({ ts: new Date().toISOString(), tab: id, kind: 'pageerror', text: err.message }),
-    );
+    page.on('console', (msg) => {
+      this.consoleLog.push({ ts: new Date().toISOString(), tab: id, kind: msg.type(), text: msg.text() });
+      this.onJournalConsole({ kind: msg.type(), text: msg.text(), tab: id });
+    });
+    page.on('pageerror', (err) => {
+      this.consoleLog.push({ ts: new Date().toISOString(), tab: id, kind: 'pageerror', text: err.message });
+      this.onJournalConsole({ kind: 'pageerror', text: err.message, tab: id });
+    });
     page.on('download', (dl) => {
       const dlId = this.nextDownloadId++;
       const safeName = (dl.suggestedFilename() || 'download').replace(/[\\/:*?"<>|]/g, '_');
@@ -813,8 +907,23 @@ export class BrowserHost {
   }
 
   /**
-   * 捕捉済みのレスポンス本文を返す。seq は kb net log の行頭に出る番号。
-   * request 行の seq が渡された場合は、同じ URL の直後の response に自動で読み替える。
+   * seq からログエントリを引く。request 行の seq が渡された場合は、
+   * 対応する response(同タブ・同 URL で seq がより大きい最初のもの)へ自動で読み替える。
+   */
+  private resolveResponseSeq(seq: number): { seq: number; entry?: NetEntry } {
+    const entry = this.netLog.query({ filter: (e) => e.seq === seq }).entries[0];
+    if (entry?.event === 'request') {
+      const resp = this.netLog.query({
+        filter: (e) => e.event === 'response' && e.tab === entry.tab && e.url === entry.url && e.seq > seq,
+      }).entries[0];
+      if (resp) return { seq: resp.seq, entry: resp };
+    }
+    return { seq, entry };
+  }
+
+  /**
+   * 捕捉済みのレスポンス本文を返す。seq は kb net log の行頭に出る番号
+   * (request 行の seq でも対応する response に自動で読み替える)。
    */
   netBody(
     seq: number,
@@ -831,21 +940,10 @@ export class BrowserHost {
     offset: number;
     truncated: boolean;
   } {
-    let entry = this.netLog.query({ filter: (e) => e.seq === seq }).entries[0];
-    let stored = this.netBodies.get(seq);
-    if (!stored && entry?.event === 'request') {
-      // request 行を指定された場合は、対応する response(同タブ・同 URL で seq がより大きい最初のもの)を探す
-      const resp = this.netLog.query({
-        filter: (e) => e.event === 'response' && e.tab === entry!.tab && e.url === entry!.url && e.seq > seq,
-      }).entries[0];
-      if (resp) {
-        stored = this.netBodies.get(resp.seq);
-        if (stored) {
-          seq = resp.seq;
-          entry = resp;
-        }
-      }
-    }
+    const resolved = this.resolveResponseSeq(seq);
+    seq = resolved.seq;
+    const entry = resolved.entry;
+    const stored = this.netBodies.get(seq);
     if (!stored) {
       const reason = entry
         ? `seq ${seq} の本文は捕捉されていません(対象はテキスト系の XHR/fetch/document。古い本文は容量上限で破棄されます)`
@@ -865,6 +963,62 @@ export class BrowserHost {
       totalChars: clipped.totalChars,
       offset: clipped.offset,
       truncated: clipped.truncated,
+    };
+  }
+
+  /** 全ヘッダ(Cookie 等の CDP extra info 含む)を捕捉する。kb net headers と操作ジャーナル用。 */
+  private async captureNetHeaders(seq: number, req: Request, res: Response, tabId: number): Promise<void> {
+    try {
+      const [request, response] = await Promise.all([req.allHeaders(), res.allHeaders()]);
+      // kb 内部の中継プロキシ認証(セッショントークン)はサイト通信と無関係なので露出させない
+      delete request['proxy-authorization'];
+      this.netHeaders.set(seq, { request, response });
+      for (const key of this.netHeaders.keys()) {
+        if (this.netHeaders.size <= NET_HEADERS_MAX) break;
+        this.netHeaders.delete(key);
+      }
+      const resourceType = req.resourceType();
+      if (BODY_RESOURCE_TYPES.has(resourceType)) {
+        this.onJournalNet({
+          method: req.method(),
+          url: res.url(),
+          status: res.status(),
+          resourceType,
+          tab: tabId,
+          requestHeaders: request,
+          postData: req.postData() ?? undefined,
+          contentType: response['content-type'],
+        });
+      }
+    } catch {
+      /* ナビゲーション後は取れないことがある */
+    }
+  }
+
+  /** 捕捉済みの全リクエスト/レスポンスヘッダを返す。seq は kb net log の行頭の番号。 */
+  netHeadersQuery(seq: number): {
+    seq: number;
+    url?: string;
+    method?: string;
+    status?: number;
+    request: Record<string, string>;
+    response: Record<string, string>;
+  } {
+    const { seq: resolvedSeq, entry } = this.resolveResponseSeq(seq);
+    const stored = this.netHeaders.get(resolvedSeq);
+    if (!stored) {
+      const reason = entry
+        ? `seq ${seq} のヘッダは記録されていません(直近 ${NET_HEADERS_MAX} レスポンスまで保持)`
+        : `seq ${seq} のログはありません(バッファから消えた可能性があります)`;
+      throw new Error(`${reason}。kb net log で response 行の seq を確認してください。`);
+    }
+    return {
+      seq: resolvedSeq,
+      url: entry?.url,
+      method: entry?.method,
+      status: entry?.status,
+      request: stored.request,
+      response: stored.response,
     };
   }
 
@@ -900,9 +1054,12 @@ export class BrowserHost {
     truncated?: boolean;
   }> {
     const started = Date.now();
+    // JSON に見えるボディで Content-Type 未指定なら application/json を補う(明示ヘッダ優先)
+    const inferred = inferJsonContentType(opts.data, opts.headers);
+    const headersToSend = inferred ? { ...(opts.headers ?? {}), 'content-type': inferred } : opts.headers;
     const res = await this.context.request.fetch(normalizeUrl(opts.url), {
       method: (opts.method ?? 'GET').toUpperCase(),
-      headers: opts.headers,
+      headers: headersToSend,
       data: opts.data,
       timeout: opts.timeoutMs ?? 30_000,
       maxRedirects: opts.follow === false ? 0 : undefined,
@@ -1170,7 +1327,18 @@ export class BrowserHost {
           const html = el.outerHTML;
           m.html = html.length > o.htmlCap ? html.slice(0, o.htmlCap) + '…' : html;
         }
-        if (o.attr) m.attr = el.getAttribute(o.attr);
+        if (o.attr) {
+          // 属性がなければ同名の DOM プロパティにフォールバックする
+          // (<select> の value や checked はプロパティにしかないため)
+          const attrValue = el.getAttribute(o.attr);
+          if (attrValue != null) {
+            m.attr = attrValue;
+          } else {
+            const propValue = (el as unknown as Record<string, unknown>)[o.attr];
+            m.attr =
+              propValue == null || typeof propValue === 'object' || typeof propValue === 'function' ? null : propValue;
+          }
+        }
         return m;
       }),
     });
@@ -1190,6 +1358,7 @@ export class BrowserHost {
       activeTab: this.activeTabId,
       downloads: this.downloads.length,
       httpAuth: this.opts?.httpCredentials != null,
+      ...(this.attached ? { attached: this.opts?.cdpUrl } : {}),
     };
   }
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BodyStore, clip, LogBuffer, normalizeUrl, parseHeaderArgs, prepareEval } from './util';
+import { BodyStore, clip, inferJsonContentType, LogBuffer, normalizeUrl, parseHeaderArgs, prepareEval } from './util';
 
 /** prepareEval の出力を Node 上で実行して結果を確かめる(page.evaluate の代わり)。 */
 async function evalPrepared(code: string): Promise<unknown> {
@@ -129,6 +129,23 @@ test('parseHeaderArgs: 値内の : は保持される', () => {
 test('parseHeaderArgs: 不正な形式はエラー', () => {
   assert.throws(() => parseHeaderArgs(['no-colon']));
   assert.throws(() => parseHeaderArgs([': empty-name']));
+});
+
+test('inferJsonContentType: JSON ボディで Content-Type 未指定なら application/json', () => {
+  assert.equal(inferJsonContentType('{"a":1}', undefined), 'application/json');
+  assert.equal(inferJsonContentType('  [1,2,3]  ', {}), 'application/json');
+});
+
+test('inferJsonContentType: 明示ヘッダがあれば推定しない(大文字小文字を問わず)', () => {
+  assert.equal(inferJsonContentType('{"a":1}', { 'Content-Type': 'text/plain' }), undefined);
+  assert.equal(inferJsonContentType('{"a":1}', { 'content-type': 'application/xml' }), undefined);
+});
+
+test('inferJsonContentType: JSON でないボディは推定しない', () => {
+  assert.equal(inferJsonContentType('a=1&b=2', undefined), undefined);
+  assert.equal(inferJsonContentType('{broken json', undefined), undefined);
+  assert.equal(inferJsonContentType(undefined, undefined), undefined);
+  assert.equal(inferJsonContentType('true', undefined), undefined); // リテラルは対象外({ / [ のみ)
 });
 
 test('BodyStore: 件数上限で古いものから捨てる', () => {

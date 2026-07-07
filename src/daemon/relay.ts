@@ -20,8 +20,28 @@ export class RelayProxy {
   private upstream: ProxyProfile = DIRECT;
   private rules: { pattern: string; name: string; profile: ProxyProfile }[] = [];
   private stats = { tunnels: 0, requests: 0, errors: 0, authRejects: 0 };
+  /** 直近の接続エラー(proxy status で原因を確認できるようにする)。 */
+  private lastErrors: { ts: string; target: string; profile: string; error: string }[] = [];
   /** 期待する Proxy-Authorization ヘッダ値。null なら認証なし。 */
   private expectedAuth: string | null = null;
+
+  /** 接続エラー発生時に呼ばれる(デーモンログへの出力用)。 */
+  onError: (message: string) => void = () => {};
+
+  /** 接続エラーを記録する(stats / 直近リスト / ログの 3 か所へ)。 */
+  private recordError(target: string, profileName: string, err: unknown): void {
+    this.stats.errors++;
+    const error = String(err instanceof Error ? err.message : err).split('\n')[0];
+    this.lastErrors.push({ ts: new Date().toISOString(), target, profile: profileName, error });
+    if (this.lastErrors.length > 20) this.lastErrors.shift();
+    this.onError(`relay: ${target} への接続に失敗 (via ${profileName}): ${error}`);
+  }
+
+  /** ホストに適用されるプロファイル名(エラー記録用)。 */
+  private profileNameFor(host: string): string {
+    for (const rule of this.rules) if (matchHost(rule.pattern, host)) return rule.name;
+    return this.upstreamName;
+  }
 
   setUpstream(name: string, profile: ProxyProfile): void {
     this.upstreamName = name;
@@ -44,6 +64,7 @@ export class RelayProxy {
       auth: this.expectedAuth != null,
       rules: this.rules.map((r) => ({ pattern: r.pattern, profile: r.name })),
       ...this.stats,
+      lastErrors: this.lastErrors,
     };
   }
 
@@ -117,7 +138,8 @@ export class RelayProxy {
       remote.on('error', () => clientSocket.destroy());
       clientSocket.on('error', () => remote.destroy());
     } catch (err) {
-      this.stats.errors++;
+      // ブラウザ側には ERR_TUNNEL_CONNECTION_FAILED として見える。原因は kb proxy status / daemon.log で確認できる
+      this.recordError(`${host}:${port}`, this.profileNameFor(host), err);
       clientSocket.end(`HTTP/1.1 502 Bad Gateway\r\n\r\n`);
     }
   }
@@ -173,8 +195,8 @@ export class RelayProxy {
       upstreamRes.pipe(res);
     });
     upstreamReq.setTimeout(CONNECT_TIMEOUT_MS, () => upstreamReq.destroy(new Error('upstream timeout')));
-    upstreamReq.on('error', () => {
-      this.stats.errors++;
+    upstreamReq.on('error', (err) => {
+      this.recordError(url.hostname, this.profileNameFor(url.hostname), err);
       if (!res.headersSent) res.writeHead(502);
       res.end();
     });
@@ -235,10 +257,10 @@ export class RelayProxy {
 
 // ---- helpers ----
 
-/** タイムアウト付き TCP 接続。 */
+/** タイムアウト付き TCP 接続。IPv6/IPv4 両対応ホストで片側が死んでいても繋がるよう happy eyeballs を有効化。 */
 function connectTcp(port: number, host: string, timeoutMs: number): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.connect(port, host);
+    const socket = net.connect({ port, host, autoSelectFamily: true });
     const timer = setTimeout(() => {
       socket.destroy();
       reject(new Error(`接続がタイムアウトしました: ${host}:${port}`));

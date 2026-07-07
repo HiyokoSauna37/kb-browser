@@ -3,9 +3,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { Command } from 'commander';
-import { PROFILES_DIR, readLastRun, removeDaemonInfo, writeLastRun } from './shared/paths';
+import { LOGS_DIR, PROFILES_DIR, readLastRun, removeDaemonInfo, writeLastRun } from './shared/paths';
 import { pingDaemon, releaseSpawnLock, rpc, rpcRaw, spawnDaemon, waitForDaemon } from './shared/client';
-import { parseHeaderArgs } from './shared/util';
+import { inferJsonContentType, parseHeaderArgs } from './shared/util';
+import {
+  redactEvent,
+  reportMarkdown,
+  requestFiles,
+  stepsMarkdown,
+  toCliString,
+  type MaskOptions,
+  type OpEvent,
+  type SessionMeta,
+} from './shared/oplog';
 import {
   loadProxyConfig,
   resolveProfile,
@@ -71,7 +81,7 @@ function fmtTabs(list: any[]): string {
 program
   .name('kb')
   .description('CLI-operable browser (Playwright + Chromium)')
-  .version('0.3.0')
+  .version('0.5.0')
   .option('--json', 'JSON 形式で出力する')
   .hook('preAction', (cmd) => {
     jsonOutput = !!cmd.optsWithGlobals().json;
@@ -85,9 +95,18 @@ daemon
   .option('--headless', 'ヘッドレスで起動する')
   .option('--headed', 'ウィンドウ表示で起動する(既定)')
   .option('--profile <name>', 'ブラウザプロファイル')
+  .option('--channel <channel>', '起動チャネルを明示する (chrome | msedge | chromium。既定は chrome → msedge → chromium の自動選択)')
+  .option('--ua <string>', 'User-Agent を全タブで上書きする(headless の "HeadlessChrome" 対策)')
+  .option('--cdp <url>', '起動済みブラウザにアタッチする (例: http://127.0.0.1:9222)。--remote-debugging-port 付きで起動した Chrome/Edge に接続し、そのサインイン状態をそのまま使う')
   .action(
-    run(async (opts: { headless?: boolean; headed?: boolean; profile?: string }) => {
+    run(async (opts: { headless?: boolean; headed?: boolean; profile?: string; channel?: string; ua?: string; cdp?: string }) => {
       if (opts.headless && opts.headed) throw new Error('--headless と --headed は同時に指定できません');
+      if (opts.channel && !['chrome', 'msedge', 'chromium'].includes(opts.channel)) {
+        throw new Error('--channel は chrome | msedge | chromium を指定してください');
+      }
+      if (opts.cdp && (opts.channel || opts.ua || opts.profile || opts.headless || opts.headed)) {
+        throw new Error('--cdp(アタッチ)は接続先ブラウザの起動条件を変更できないため、--channel / --ua / --profile / --headless とは併用できません');
+      }
       const running = await pingDaemon();
       if (running) {
         print({ alreadyRunning: true, pid: running.pid }, (r) => `既に起動しています (pid=${r.pid})`);
@@ -95,10 +114,14 @@ daemon
       }
       try {
         // 明示起動は「フラグなし = headed」の契約を守る(last-run を継承するのは自動 spawn のみ)
-        spawnDaemon({ headless: !!opts.headless, profile: opts.profile });
+        spawnDaemon({ headless: !!opts.headless, profile: opts.profile, channel: opts.channel, userAgent: opts.ua, cdpUrl: opts.cdp });
         const info = await waitForDaemon();
         const status = await rpcRaw(info, 'daemon.status');
-        print(status, (s) => `起動しました (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile})`);
+        print(status, (s) =>
+          s.attached
+            ? `起動しました (pid=${s.pid}, attach=${s.attached}, tabs=${s.tabs})`
+            : `起動しました (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile})`,
+        );
       } finally {
         releaseSpawnLock();
       }
@@ -133,7 +156,7 @@ daemon
       }
       const status = await rpcRaw(info, 'daemon.status');
       print({ running: true, ...status }, (s) =>
-        `running (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}, tabs=${s.tabs}, proxy=${s.proxy})`,
+        `running (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}, tabs=${s.tabs}, proxy=${s.proxy}${s.attached ? `, attach=${s.attached}` : ''})`,
       );
     }),
   );
@@ -666,6 +689,233 @@ storage
     }),
   );
 
+// ---- log (操作記録: ジャーナル / レポート / マスク付きエクスポート) ----
+
+interface MaskCliOpts {
+  /** commander の --no-mask で false になる(既定 true = マスク適用)。 */
+  mask?: boolean;
+  allow?: string;
+  deny?: string;
+}
+
+function maskOptions(opts: MaskCliOpts): MaskOptions {
+  return {
+    mask: opts.mask !== false,
+    allow: opts.allow ? new RegExp(opts.allow, 'i') : undefined,
+    deny: opts.deny ? new RegExp(opts.deny, 'i') : undefined,
+  };
+}
+
+/** マスク関連の共通オプションを付ける。 */
+function withMaskOpts(cmd: Command): Command {
+  return cmd
+    .option('--no-mask', '機微な値のマスクを解除する(既定はマスク)')
+    .option('--allow <regex>', 'この正規表現に一致する名前はマスクしない')
+    .option('--deny <regex>', 'この正規表現に一致する名前・値を追加でマスクする');
+}
+
+function listSessionDirs(): { name: string; dir: string; meta: SessionMeta | null }[] {
+  let entries: string[] = [];
+  try {
+    entries = fs.readdirSync(LOGS_DIR).filter((e) => fs.existsSync(path.join(LOGS_DIR, e, 'events.jsonl')) || fs.existsSync(path.join(LOGS_DIR, e, 'meta.json')));
+  } catch {
+    return [];
+  }
+  return entries.map((name) => {
+    const dir = path.join(LOGS_DIR, name);
+    let meta: SessionMeta | null = null;
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
+    } catch {
+      /* meta なしでも一覧には出す */
+    }
+    return { name, dir, meta };
+  }).sort((a, b) => (a.meta?.startedAt ?? '').localeCompare(b.meta?.startedAt ?? ''));
+}
+
+/** セッションを解決する(省略時は最新)。 */
+function resolveSession(name?: string): { name: string; dir: string; meta: SessionMeta } {
+  const sessions = listSessionDirs();
+  if (!sessions.length) throw new Error('操作ログのセッションがありません(デーモン起動中は自動で記録されます)');
+  const found = name ? sessions.find((s) => s.name === name) : sessions[sessions.length - 1];
+  if (!found) throw new Error(`セッション "${name}" は存在しません。kb log list で確認してください。`);
+  return { name: found.name, dir: found.dir, meta: found.meta ?? { name: found.name, startedAt: '' } };
+}
+
+function readEvents(dir: string): OpEvent[] {
+  let raw = '';
+  try {
+    raw = fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8');
+  } catch {
+    return [];
+  }
+  const events: OpEvent[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      /* 壊れた行はスキップ */
+    }
+  }
+  return events;
+}
+
+const logCmd = program.command('log').description('操作記録の管理(既定で常時記録。レポート/再現手順/マスク付きバンドルを生成)');
+
+logCmd
+  .command('start')
+  .description('新しい記録セッションを開始する(現在のセッションは閉じる)')
+  .option('--name <name>', 'セッション名(省略時はタイムスタンプ)')
+  .action(
+    run(async (opts: { name?: string }) => {
+      const result = await rpc('log.start', { name: opts.name });
+      print(result, (r) => `セッション "${r.name}" の記録を開始しました (${r.dir})`);
+    }),
+  );
+
+logCmd
+  .command('stop')
+  .description('現在の記録セッションを終了する')
+  .action(
+    run(async () => {
+      const result = await rpc('log.stop');
+      print(result, (r) => (r.name ? `セッション "${r.name}" を終了しました (${r.events} イベント)` : '記録中のセッションはありません'));
+    }),
+  );
+
+logCmd
+  .command('status')
+  .description('現在の記録状態を表示する')
+  .action(
+    run(async () => {
+      const result = await rpc('log.status');
+      print(result, (r) => (r.recording ? `記録中: ${r.name} (${r.events} イベント)` : '記録していません'));
+    }),
+  );
+
+logCmd
+  .command('list', { isDefault: true })
+  .description('記録セッションの一覧を表示する')
+  .action(
+    run(async () => {
+      const sessions = listSessionDirs().map((s) => ({
+        name: s.name,
+        startedAt: s.meta?.startedAt,
+        endedAt: s.meta?.endedAt,
+        events: readEvents(s.dir).length,
+      }));
+      print(sessions, (list: any[]) =>
+        list.length
+          ? list
+              .map((s) => `${s.name.padEnd(20)} ${s.events} イベント  ${s.startedAt ?? ''}${s.endedAt ? ` 〜 ${s.endedAt}` : ' (記録中の可能性)'}`)
+              .join('\n')
+          : 'セッションはありません',
+      );
+    }),
+  );
+
+withMaskOpts(
+  logCmd
+    .command('show')
+    .description('記録イベントを表示する(既定はマスク済み・最新セッション)')
+    .option('--session <name>', '対象セッション(省略時は最新)')
+    .option('-n, --limit <n>', '末尾から表示する件数', intOpt, 50),
+)
+  .action(
+    run(async (opts: MaskCliOpts & { session?: string; limit: number }) => {
+      const { dir } = resolveSession(opts.session);
+      const mask = maskOptions(opts);
+      const events = readEvents(dir).map((e) => redactEvent(e, mask)).slice(-opts.limit);
+      print(events, (list: OpEvent[]) =>
+        list.length
+          ? list
+              .map((e) => {
+                if (e.type === 'command') return `#${e.seq} ${e.ts.slice(11, 19)} $ ${toCliString(e)}${e.ok ? '' : `  ← 失敗: ${e.error ?? ''}`}`;
+                if (e.type === 'net') return `#${e.seq} ${e.ts.slice(11, 19)}   ↳ ${e.method} ${e.url} → ${e.status ?? '?'}`;
+                return `#${e.seq} ${e.ts.slice(11, 19)}   ↳ console[${e.kind}] ${e.text.slice(0, 150)}`;
+              })
+              .join('\n')
+          : 'イベントはありません',
+      );
+    }),
+  );
+
+withMaskOpts(
+  logCmd
+    .command('steps')
+    .description('番号付きの再現手順(kb コマンド列)を生成する')
+    .option('--session <name>', '対象セッション(省略時は最新)'),
+)
+  .action(
+    run(async (opts: MaskCliOpts & { session?: string }) => {
+      const { dir, meta } = resolveSession(opts.session);
+      const mask = maskOptions(opts);
+      const events = readEvents(dir).map((e) => redactEvent(e, mask));
+      const md = stepsMarkdown(events, meta);
+      print({ steps: md }, () => md);
+    }),
+  );
+
+withMaskOpts(
+  logCmd
+    .command('export')
+    .description('自己完結バンドル(report.md + events.jsonl + requests/ + shots/ + meta.json)を生成する。機微な値は既定でマスク')
+    .option('--session <name>', '対象セッション(省略時は最新)')
+    .option('-o, --out <dir>', '出力先フォルダ(省略時は ./kb-log-<session>)'),
+)
+  .action(
+    run(async (opts: MaskCliOpts & { session?: string; out?: string }) => {
+      const { name, dir, meta } = resolveSession(opts.session);
+      const mask = maskOptions(opts);
+      const outDir = path.resolve(opts.out ?? `kb-log-${name}`);
+      if (/\.zip$/i.test(outDir)) throw new Error('出力先はフォルダを指定してください(zip が必要な場合は生成後に Compress-Archive 等で圧縮)');
+      const raw = readEvents(dir);
+      const events = raw.map((e) => redactEvent(e, mask));
+
+      fs.mkdirSync(outDir, { recursive: true });
+      fs.mkdirSync(path.join(outDir, 'requests'), { recursive: true });
+      fs.mkdirSync(path.join(outDir, 'shots'), { recursive: true });
+
+      // スクリーンショット: 記録されたパスのファイルが残っていればバンドルへコピー
+      const shotMap = new Map<number, string>();
+      for (const e of events) {
+        if (e.type !== 'command' || e.cmd !== 'screenshot' || !e.ok) continue;
+        const src = String((e.args as any).path ?? '');
+        if (!src || !fs.existsSync(src)) continue;
+        const rel = `shots/step-${e.seq}${path.extname(src) || '.png'}`;
+        fs.copyFileSync(src, path.join(outDir, rel));
+        shotMap.set(e.seq, rel);
+      }
+
+      fs.writeFileSync(path.join(outDir, 'report.md'), reportMarkdown(events, meta, shotMap));
+      fs.writeFileSync(path.join(outDir, 'steps.md'), stepsMarkdown(events, meta));
+      fs.writeFileSync(path.join(outDir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + (events.length ? '\n' : ''));
+      fs.writeFileSync(path.join(outDir, 'meta.json'), JSON.stringify(meta, null, 2));
+      const reqs = requestFiles(events);
+      for (const f of reqs) fs.writeFileSync(path.join(outDir, 'requests', f.name), f.content);
+
+      print(
+        { out: outDir, events: events.length, requests: reqs.length, shots: shotMap.size, masked: mask.mask ? true : false },
+        (r) =>
+          `${r.out}\n(events=${r.events}, requests=${r.requests}, shots=${r.shots}, マスク=${r.masked ? '適用' : '解除'})\nreport.md から読み始めてください`,
+      );
+    }),
+  );
+
+logCmd
+  .command('rm <session>')
+  .description('記録セッションを削除する')
+  .action(
+    run(async (session: string) => {
+      const { name, dir } = resolveSession(session);
+      const status = await rpc('log.status').catch(() => null);
+      if (status?.recording && status.name === name) throw new Error(`セッション "${name}" は記録中です。kb log stop してから削除してください。`);
+      fs.rmSync(dir, { recursive: true, force: true });
+      print({ removed: name }, () => `セッション "${name}" を削除しました`);
+    }),
+  );
+
 // ---- profile ----
 
 const profileCmd = program.command('profile').description('ブラウザプロファイル (user-data-dir) の管理');
@@ -978,6 +1228,22 @@ net
   );
 
 net
+  .command('headers <seq>')
+  .description('リクエスト/レスポンスの全ヘッダを表示する(seq は kb net log の行頭の # 番号。Cookie 等の CDP 追加情報も含む)')
+  .action(
+    run(async (seqStr: string) => {
+      const seq = parseInt(seqStr.replace(/^#/, ''), 10);
+      if (!Number.isFinite(seq)) throw new Error('seq は kb net log の行頭に表示される番号で指定してください (例: kb net headers 123)');
+      const r = await rpc('net.headers', { seq });
+      print(r, () => {
+        const fmt = (h: Record<string, string>) =>
+          Object.entries(h).map(([k, v]) => `${k}: ${v}`).join('\n') || '(なし)';
+        return `# ${r.method} ${r.url}\n\n── request headers ──\n${fmt(r.request)}\n\n── response headers (${r.status}) ──\n${fmt(r.response)}`;
+      });
+    }),
+  );
+
+net
   .command('clear')
   .description('ネットワークログを消去する')
   .action(
@@ -999,14 +1265,19 @@ net
 
 net
   .command('mock <pattern>')
-  .description('パターンに一致するリクエストへ固定レスポンスを返す')
-  .requiredOption('--body <file>', 'レスポンス本文のファイル')
+  .description('パターンに一致するリクエストへ固定レスポンスを返す(ページが既に発行しているリクエストにも効く。エラー画面の確認などに)')
+  .option('--body <file>', 'レスポンス本文のファイル')
+  .option('--text <body>', 'レスポンス本文を直接指定する(--body の代わり)')
   .option('--status <n>', 'ステータスコード', intOpt, 200)
-  .option('--content-type <ct>', 'Content-Type (省略時は拡張子から推定)')
+  .option('--content-type <ct>', 'Content-Type (省略時は拡張子または本文から推定)')
   .action(
-    run(async (pattern: string, opts: { body: string; status: number; contentType?: string }) => {
-      const body = fs.readFileSync(path.resolve(opts.body), 'utf8');
-      const contentType = opts.contentType ?? guessContentType(opts.body);
+    run(async (pattern: string, opts: { body?: string; text?: string; status: number; contentType?: string }) => {
+      if (opts.body && opts.text !== undefined) throw new Error('--body と --text は同時に指定できません');
+      // 本文なし(--status のみ)も許可する: 500 等のステータスだけ差し替える用途
+      const body = opts.body ? fs.readFileSync(path.resolve(opts.body), 'utf8') : (opts.text ?? '');
+      const contentType =
+        opts.contentType ??
+        (opts.body ? guessContentType(opts.body) : inferJsonContentType(body, undefined) ?? 'text/plain; charset=utf-8');
       const rule = await rpc('net.mock', { pattern, status: opts.status, contentType, body });
       print(rule, (r) => `rule ${r.id}: mock ${r.pattern} → ${r.status} ${r.contentType}`);
     }),
@@ -1265,7 +1536,14 @@ proxy
       const status = await rpcRaw(info, 'proxy.status');
       print(status, (s) => {
         const rules = s.rules.length ? s.rules.map((r: any) => `\n  ${r.pattern} → ${r.profile}`).join('') : '';
-        return `active: ${s.active} (tunnels=${s.tunnels}, requests=${s.requests}, errors=${s.errors})${rules}`;
+        const errs = s.lastErrors?.length
+          ? `\n最近の接続エラー:` +
+            s.lastErrors
+              .slice(-5)
+              .map((e: any) => `\n  ${e.ts.slice(11, 19)} ${e.target} (via ${e.profile}) — ${e.error}`)
+              .join('')
+          : '';
+        return `active: ${s.active} (tunnels=${s.tunnels}, requests=${s.requests}, errors=${s.errors})${rules}${errs}`;
       });
     }),
   );

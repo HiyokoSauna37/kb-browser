@@ -2,8 +2,10 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { BrowserHost } from './host';
+import { Journal } from './journal';
 import { RelayProxy } from './relay';
 import { loadProxyConfig, resolveProfile } from '../shared/proxyStore';
+import { clipStr, summarizeArgs } from '../shared/oplog';
 import {
   DAEMON_LOG_PATH,
   ensureKbHome,
@@ -35,19 +37,51 @@ function tokenMatches(given: unknown, expected: string): boolean {
 async function main(): Promise<void> {
   ensureKbHome();
 
+  const argValue = (name: string): string | undefined => {
+    const idx = process.argv.indexOf(name);
+    return idx >= 0 ? process.argv[idx + 1] : undefined;
+  };
   const headless = process.argv.includes('--headless');
-  const profileArgIdx = process.argv.indexOf('--profile');
-  const profile = profileArgIdx >= 0 ? process.argv[profileArgIdx + 1] : 'default';
+  const profile = argValue('--profile') ?? 'default';
+  const channel = argValue('--channel') as 'chrome' | 'msedge' | 'chromium' | undefined;
+  const userAgent = argValue('--ua');
+  const cdpUrl = argValue('--cdp');
 
   const host = new BrowserHost();
   const relay = new RelayProxy();
+  const journal = new Journal();
   const token = crypto.randomBytes(16).toString('hex');
   let shuttingDown = false;
+
+  /** 操作ジャーナルに記録しない読み取り系・ログ操作系コマンド。 */
+  const JOURNAL_EXCLUDE = new Set([
+    'daemon.status', 'daemon.stop',
+    'tabs.list', 'downloads.list', 'cookies.list', 'storage.dump',
+    'net.log', 'net.body', 'net.headers', 'net.rules', 'net.har.status',
+    'console.log', 'proxy.status', 'proxy.test',
+    'log.start', 'log.stop', 'log.status',
+  ]);
+
+  /** RPC 1 回分をジャーナルへ記録する。 */
+  function journalCommand(rpc: RpcRequest, ok: boolean, durationMs: number, result?: unknown, error?: string): void {
+    if (JOURNAL_EXCLUDE.has(rpc.cmd)) return;
+    const summary = result === undefined ? undefined : clipStr(JSON.stringify(result) ?? '', 500);
+    journal.append({
+      type: 'command',
+      cmd: rpc.cmd,
+      args: summarizeArgs(rpc.cmd, rpc.args ?? {}),
+      ok,
+      durationMs,
+      ...(summary !== undefined ? { result: summary } : {}),
+      ...(error !== undefined ? { error } : {}),
+    });
+  }
 
   const shutdown = async (reason: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     log(`shutdown: ${reason}`);
+    journal.stop();
     removeDaemonInfoIfOwned(process.pid);
     await host.stop();
     await relay.stop();
@@ -81,12 +115,16 @@ async function main(): Promise<void> {
       return respond(400, { ok: false, error: 'invalid JSON body' });
     }
 
+    const startedMs = Date.now();
     try {
       const result = await dispatch(rpc);
+      journalCommand(rpc, true, Date.now() - startedMs, result);
       respond(200, { ok: true, result });
       if (rpc.cmd === 'daemon.stop') void shutdown('stop command');
     } catch (err) {
-      respond(200, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      journalCommand(rpc, false, Date.now() - startedMs, undefined, message);
+      respond(200, { ok: false, error: message });
     }
   });
 
@@ -185,6 +223,14 @@ async function main(): Promise<void> {
         return host.netLogQuery(args);
       case 'net.body':
         return host.netBody(args.seq, { maxChars: args.maxChars, offset: args.offset });
+      case 'net.headers':
+        return host.netHeadersQuery(args.seq);
+      case 'log.start':
+        return journal.start(args.name, sessionMeta());
+      case 'log.stop':
+        return journal.stop();
+      case 'log.status':
+        return journal.status();
       case 'request':
         return host.httpRequest({
           url: args.url,
@@ -221,13 +267,13 @@ async function main(): Promise<void> {
         return host.domQuery(args.selector, args, args.tab);
       case 'mode.set': {
         const result = await host.setMode(!!args.headless);
-        writeLastRun({ headless: host.headless, profile: host.profile });
+        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent });
         log(`mode switched: headless=${result.headless} (restored ${result.restoredTabs} tabs)`);
         return result;
       }
       case 'profile.set': {
         const result = await host.setProfile(args.name);
-        writeLastRun({ headless: host.headless, profile: host.profile });
+        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent });
         log(`profile switched: ${result.profile} (restored ${result.restoredTabs} tabs)`);
         return result;
       }
@@ -280,16 +326,40 @@ async function main(): Promise<void> {
     ? null
     : { username: 'kb', password: crypto.randomBytes(12).toString('hex') };
   if (relayAuth) relay.setAuth(relayAuth.username, relayAuth.password);
+  relay.onError = (msg) => log(msg);
 
   const relayPort = await relay.start();
 
-  log(`starting (headless=${headless}, profile=${profile}, proxy=${relay.status().active}, relayPort=${relayPort}, relayAuth=${!!relayAuth})`);
+  log(
+    `starting (headless=${headless}, profile=${profile}, channel=${channel ?? 'auto'}, ua=${userAgent ? 'custom' : 'default'}, ` +
+      `attach=${cdpUrl ?? 'no'}, proxy=${relay.status().active}, relayPort=${relayPort}, relayAuth=${!!relayAuth})`,
+  );
   await host.start({
     headless,
     profile,
-    proxy: { server: `http://127.0.0.1:${relayPort}`, ...(relayAuth ?? {}) },
+    channel,
+    userAgent,
+    cdpUrl,
+    // アタッチ先ブラウザのプロキシは変更できないため、通常起動時のみ中継を向ける
+    proxy: cdpUrl ? undefined : { server: `http://127.0.0.1:${relayPort}`, ...(relayAuth ?? {}) },
   });
-  writeLastRun({ headless, profile });
+  // アタッチは明示起動のみの契約(自動 spawn が存在しない Chrome への接続で失敗しないよう last-run に残さない)
+  if (!cdpUrl) writeLastRun({ headless, profile, channel, userAgent });
+
+  /** 操作ログセッションの meta(log.start でも使う)。 */
+  const sessionMeta = () => ({
+    profile: host.profile,
+    headless: host.headless,
+    channel: host.channel,
+    ...(cdpUrl ? { attach: cdpUrl } : {}),
+    kbVersion: '0.5.0',
+  });
+
+  // 操作ログは既定で常時 ON(セッション = デーモンの一生。kb log start --name で明示分割できる)
+  host.onJournalNet = (ev) => journal.append({ type: 'net', ...ev });
+  host.onJournalConsole = (ev) => journal.append({ type: 'console', ...ev });
+  const session = journal.start(undefined, sessionMeta());
+  log(`journal started: ${session.name}`);
 
   server.listen(0, '127.0.0.1', () => {
     const address = server.address();

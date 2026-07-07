@@ -14,7 +14,7 @@ import { loadProxyConfig, saveProxyConfig } from './shared/proxyStore';
  * 登録例: claude mcp add kb -- kb-mcp
  */
 
-const server = new McpServer({ name: 'kb-browser', version: '0.3.0' });
+const server = new McpServer({ name: 'kb-browser', version: '0.5.0' });
 
 type ToolResult = {
   content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[];
@@ -216,6 +216,13 @@ tool(
     const r = await rpc('net.body', { seq, maxChars, offset });
     return text(withTruncNote(`# ${r.status} ${r.contentType} — ${r.url}\n\n${r.body}`, r));
   }),
+);
+
+tool(
+  'kb_net_headers',
+  '指定リクエストの全リクエスト/レスポンスヘッダを取得する(Cookie 等の CDP 追加情報も含む)。seq は kb_net_log エントリの seq。',
+  { seq: z.number().int().describe('kb_net_log エントリの seq') },
+  safe(async ({ seq }) => text(await rpc('net.headers', { seq }))),
 );
 
 tool(
