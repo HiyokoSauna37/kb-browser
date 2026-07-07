@@ -1,6 +1,17 @@
-# kb — CLI Browser
+<p align="center">
+  <img src="assets/banner.png" alt="kb — CLI Browser" width="760">
+</p>
 
-**すべての操作を CLI から行えるブラウザ。** Playwright + Chromium (CDP) ベース。
+<p align="center">
+  <b>すべての操作を CLI から行えるブラウザ。</b> Playwright + Chromium (CDP) ベース。
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3ddc97.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A518-3ddc97.svg" alt="Node >= 18">
+  <img src="https://img.shields.io/badge/Playwright-Chromium-2a3244.svg" alt="Playwright + Chromium">
+  <img src="https://img.shields.io/badge/MCP-23%20tools-2a3244.svg" alt="MCP · 23 tools">
+</p>
 
 English version: [README.md](README.md)
 

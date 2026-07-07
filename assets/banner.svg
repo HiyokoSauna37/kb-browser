@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="kb — CLI Browser">
+  <defs>
+    <linearGradient id="bbg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#141a28"/>
+      <stop offset="1" stop-color="#0a0c12"/>
+    </linearGradient>
+    <linearGradient id="ibg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c2233"/>
+      <stop offset="1" stop-color="#0a0c12"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bbg)"/>
+
+  <!-- icon -->
+  <g transform="translate(150 172)">
+    <rect x="0" y="0" width="296" height="296" rx="66" fill="url(#ibg)" stroke="#2a3244" stroke-width="2"/>
+    <circle cx="66" cy="74" r="9" fill="#ff5f57"/>
+    <circle cx="96" cy="74" r="9" fill="#febc2e"/>
+    <circle cx="126" cy="74" r="9" fill="#28c840"/>
+    <line x1="42" y1="104" x2="254" y2="104" stroke="#2a3244" stroke-width="2"/>
+    <g font-family="ui-monospace, 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-weight="700" font-size="104">
+      <text x="40" y="228" fill="#3ddc97">&gt;</text>
+      <text x="112" y="228" fill="#e9eef5">kb</text>
+    </g>
+    <rect x="232" y="152" width="21" height="76" rx="3" fill="#3ddc97"/>
+  </g>
+
+  <!-- wordmark + tagline -->
+  <g font-family="ui-monospace, 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace">
+    <text x="530" y="300" font-size="150" font-weight="700" fill="#e9eef5">kb</text>
+    <text x="702" y="300" font-size="54" font-weight="500" fill="#7d8aa0">— CLI Browser</text>
+  </g>
+  <g font-family="-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+    <text x="532" y="360" font-size="36" fill="#c4cdda" textLength="700" lengthAdjust="spacingAndGlyphs">A browser you drive entirely from the command line.</text>
+    <text x="532" y="426" font-size="30" fill="#3ddc97" font-weight="600" textLength="700" lengthAdjust="spacingAndGlyphs">Playwright + Chromium &#160;·&#160; MCP &#160;·&#160; DevTools &#160;·&#160; Proxy &#160;·&#160; Agent-ready</text>
+  </g>
+</svg>
