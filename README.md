@@ -89,7 +89,7 @@ kb net log --filter "api"    # note the #seq at the start of each line
 kb net body 42               # print that response body (JSON reads as-is)
 ```
 
-Bodies are captured automatically for text-like (JSON / HTML / JS / XML …) XHR / fetch / document responses (up to 256 KB each, 32 MB total).
+Bodies are captured automatically for text-like (JSON / HTML / JS / XML …) XHR / fetch / document responses. Capture is truncated at **256 KB per response** (32 MB / 500 entries total, oldest evicted first): `--offset` pages within the captured part, but anything beyond 256 KB is not recoverable afterwards — if you need the full body of a large response, re-fetch it with `kb request <url> -o <file>`.
 
 To hit an endpoint directly, use `kb request` (a mini REST client):
 

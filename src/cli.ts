@@ -969,7 +969,9 @@ net
       if (!Number.isFinite(seq)) throw new Error('seq は kb net log の行頭に表示される番号で指定してください (例: kb net body 123)');
       const r = await rpc('net.body', { seq, maxChars: opts.maxChars, offset: opts.offset });
       print(r, () => {
-        const cap = r.capturedTruncated ? `(先頭 ${r.totalChars} 文字のみ捕捉、全体 ${r.fullBytes} bytes)` : '';
+        const cap = r.capturedTruncated
+          ? `(先頭 ${r.totalChars} 文字のみ捕捉、全体 ${r.fullBytes} bytes。全文は kb request <url> -o <file> で取り直せます)`
+          : '';
         return `# ${r.status} ${r.contentType} — ${r.url}${cap}\n\n${r.body}${truncNote(r, r.body.length)}`;
       });
     }),

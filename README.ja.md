@@ -89,7 +89,7 @@ kb net log --filter "api"    # 行頭の #seq を確認
 kb net body 42               # そのレスポンス本文を表示(JSON もそのまま読める)
 ```
 
-本文はテキスト系(JSON / HTML / JS / XML 等)の XHR / fetch / document レスポンスについて自動で捕捉されます(1 件 256KB・全体 32MB まで保持)。
+本文はテキスト系(JSON / HTML / JS / XML 等)の XHR / fetch / document レスポンスについて自動で捕捉されます。捕捉は **1 件 256KB で切り詰め**(全体 32MB / 500 件、古い順に破棄)。`--offset` は捕捉済みの範囲内のページングで、256KB を超えた部分は後から取り戻せません — 大きなレスポンスの全文が必要なときは `kb request <url> -o <file>` で取り直してください。
 
 開発中のエンドポイントを直接叩くには `kb request`(ミニ REST クライアント):
 

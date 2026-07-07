@@ -87,7 +87,7 @@ kb console [-f] [--clear]                     # console.log / pageerror
 kb dom query "h1" [--html] [--attr href] [--frame iframe]
 ```
 
-ログはデーモン内のリングバッファ(3000 件)に seq 付きで蓄積され、`-f` は since カーソルのポーリング(700ms)で追従する。レスポンス本文はテキスト系 Content-Type の XHR / fetch / document / other について自動捕捉される(1 件 256KB・全体 32MB / 500 件で古いものから破棄。実装は `captureNetBody()` + `BodyStore`)。request 行の seq を渡しても対応する response に自動で読み替える。
+ログはデーモン内のリングバッファ(3000 件)に seq 付きで蓄積され、`-f` は since カーソルのポーリング(700ms)で追従する。レスポンス本文はテキスト系 Content-Type の XHR / fetch / document / other について自動捕捉される(実装は `captureNetBody()` + `BodyStore`)。**捕捉は 1 件 256KB(NET_BODY_CAP)で切り詰め**、全体 32MB / 500 件で古いものから破棄。`--offset` は捕捉済み範囲内のページングであり、256KB を超えた部分は後から取得できない(全文が要るときは `kb request -o` で取り直す)。request 行の seq を渡しても対応する response に自動で読み替える。
 
 ## プロキシ操作
 
@@ -129,5 +129,5 @@ docs/requirements.md 参照。M1(骨格)/ M2(プロキシプロファイル)/ M3
 - ref 自動再解決は「同じ role/name が一意」の場合のみ。同名ボタンが複数あるページでは再解決されずエラーになる(安全側)。
 - `kb net mock` はテキスト本文のみ(バイナリ未対応)。
 - UA エミュレーションの reset は空文字セット頼みで、完全に戻すにはタブを開き直すのが確実。
-- `kb net body` の捕捉対象はテキスト系の xhr/fetch/document/other のみ(画像・大量の静的アセットは対象外。バイナリレスポンスは HAR か `kb request -o` で)。
+- `kb net body` の捕捉対象はテキスト系の xhr/fetch/document/other のみで、256KB/件で truncate(HAR も同様にテキスト系・256KB 以下のみ本文を含める)。バイナリや 256KB 超の全文は `kb request -o <file>` で取り直すのが唯一の経路。
 - storage restore の localStorage 復元はオリジンごとに一時ページを開く方式(遷移不可のオリジンはスキップされる)。
