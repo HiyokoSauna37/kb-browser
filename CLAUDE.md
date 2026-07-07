@@ -14,12 +14,18 @@ kb <cmd>               # npm link 済み(グローバル)。開発中は node di
 
 ## アーキテクチャ
 
-- `src/cli.ts` — CLI クライアント (commander)。全コマンド `--json` 対応(成功 `{ok:true,result}` / 失敗 `{ok:false,error}`)。
+- `src/cli.ts` — CLI エントリ(bin)。コマンド定義はグループ別に `src/cli/commands/`(daemon / browse / actions / state / log / env / net / proxy)にあり、登録順 = ヘルプの表示順。全コマンド `--json` 対応(成功 `{ok:true,result}` / 失敗 `{ok:false,error}`)。
+- `src/cli/output.ts` — CLI 共通の出力ヘルパ(print / run / truncNote / fmtTabs)と `--json` 状態の一元管理(setJsonOutput / isJsonOutput)。
 - `src/mcp.ts` — MCP stdio サーバ (`kb-mcp`)。デーモンの機能を 23 ツールとして公開。`claude mcp add kb -- kb-mcp` で登録。**SDK の zod ジェネリクスは tsc をメモリ爆発させるため、型消去した `tool()` ラッパ経由で登録している(server.tool を直接呼ばないこと)。**
+- `src/shared/version.ts` — `KB_VERSION`。package.json を単一の情報源として実行時に読む(バージョン文字列をコードに書かないこと)。
 - `src/shared/client.ts` — デーモンへの RPC クライアント(CLI / MCP 共用)。未起動時は自動 spawn(前回の headless/profile/channel/ua を last-run.json から引き継ぎ、spawn ロックで二重起動を防止。**起動内容を stderr に 1 行通知**)。pid 生存確認付きの stale 判定。**明示的な `kb daemon start` はフラグなし = headed**(last-run 継承は自動 spawn のみ)。`waitForDaemon(child)` は spawn 直後の子プロセス死亡を検知して 30 秒待たずに daemon.log 付きで即エラー(--cdp 接続失敗などの fail-fast)。`--ua ""` / `--channel auto` は last-run 継承をクリアする明示リセット。
 - `src/shared/util.ts` — 純粋関数(normalizeUrl / clip / LogBuffer / prepareEval)。テスト対象。**prepareEval は eval コードの自動 async ラップ**(await 入りの式・複数文を async IIFE 化し、最後の式を構文チェック付きで return に書き換える)。
 - `src/daemon/main.ts` — HTTP サーバ (127.0.0.1 ランダムポート + timing-safe トークン認証)。RPC を host にディスパッチ。uncaughtException でデーモンを落とさない。
-- `src/daemon/host.ts` — BrowserHost。`launchPersistentContext` で Chromium を保持、タブを ID 管理。channel は chrome → msedge → 同梱 chromium の順にフォールバック(`--channel` 明示時はフォールバックせず strict)。`--ua` で context 全体の UA 上書き。mode/profile/auth 切替は共通の `restart()` でタブ URL を復元。**アタッチモード**(`--cdp <url>` → `connectOverCDP`)では既存ブラウザの既定 context に接続する: stop は `browser.close()` で切断のみ(対象ブラウザは殺さない)、mode/profile/auth と proxy 切替は `assertNotAttached()` でエラー、last-run に cdp は残さない(自動 spawn は常に通常起動)。Chrome 136+ は既定プロファイルで CDP 不可(専用 --user-data-dir 必須)。
+- `src/daemon/host.ts` — BrowserHost(facade。RPC から呼ばれるメソッド名はここに揃う)。`launchPersistentContext` で Chromium を保持、タブを ID 管理。channel は chrome → msedge → 同梱 chromium の順にフォールバック(`--channel` 明示時はフォールバックせず strict)。`--ua` で context 全体の UA 上書き。**`--stealth`** は自前起動時のみ起動 args に `--disable-blink-features=AutomationControlled` を付けて `navigator.webdriver` を実 Chrome 同様に消す。計測上、chrome チャネルではこのフラグ**だけ**で plugins/languages/WebGL/permissions まで実 Chrome と一致するため、**JS パッチ(init script)は入れていない**(過剰パッチ自体が新たな検知痕跡になる — 以前 permissions シムを入れて `query.toString()` 非ネイティブ化等の綻びを増やしたため撤去した)。残る綻びは headless の "HeadlessChrome" UA だけなので `--ua` と併用するか headed を使う。**JA3/TLS・HTTP2・IP レピュテーション等のサーバ側判定は別レイヤで、client 側では潰せない**(Cloudflare Managed Challenge 突破は保証しない)。アタッチ(`--cdp`)時は start() で stealth を無効に正規化(status が嘘をつかないため)。mode/profile/auth 切替は共通の `restart()` でタブ URL を復元(stealth も維持)。**アタッチモード**(`--cdp <url>` → `connectOverCDP`)では既存ブラウザの既定 context に接続する: stop は `browser.close()` で切断のみ(対象ブラウザは殺さない)、mode/profile/auth と proxy 切替は `assertNotAttached()` でエラー、last-run に cdp は残さない(自動 spawn は常に通常起動)。Chrome 136+ は既定プロファイルで CDP 不可(専用 --user-data-dir 必須)。
+- `src/daemon/netMonitor.ts` — NetMonitor。通信ログのリングバッファ、テキスト系レスポンス本文・全ヘッダの捕捉(`kb net body/headers`。request seq → response seq の自動読み替え含む)、block/mock ルール(再起動時は `reapplyRoutes()` で新 context に引き継ぐ)、HAR 記録、ジャーナル向け net イベント通知。
+- `src/daemon/targets.ts` — TargetResolver。selector / ref / frame → Locator の解決と、失効 ref の自動再解決(タブ毎の直近 snapshot キャッシュで role/name 照合。実装は `act()` / `reResolveRef()`)。
+- `src/daemon/emulation.ts` — Emulator。UA / viewport / tz / 回線の CDP エミュレーション。CDP セッションを detach するとオーバーライドが消えるため、タブ毎に CDPSession を保持し続ける。
+- `src/daemon/types.ts` — デーモン内共有の型(HostOptions / Target / NetEntry 等)と調整定数(LOG_CAP / TEXT_CAP / TEXT_CONTENT_RE)。host.ts から re-export される。
 - `src/daemon/relay.ts` — ローカル中継プロキシ。Chromium は常にここを向き、上流(http/socks5/direct)だけ差し替えることで**無再起動のプロキシ切替**を実現。SOCKS5 認証代行・bypass パターン・接続タイムアウト(10s)もこの層。**中継自体もセッション毎トークンの Basic 認証**で他ローカルプロセスの相乗りを防ぐ(KB_RELAY_NOAUTH=1 で無効化)。
 - `src/shared/oplog.ts` — 操作ログの純関数層(イベント型 / マスキング / report.md / steps / curl 生成)。テスト対象。**マスクは export/show 時のみ適用し、生ジャーナルは無改変**が原則。fill 値・eval 戻り値・機微ヘッダ・ボディ内の password/token 系キー・**URL クエリの機微キー**(net.url / args.url / 結果 payload の url / Location・Referer ヘッダ / **HTTP/2 の :path 擬似ヘッダ** / 本文中の URL。クエリ値が URL の場合は再帰マスク、深さ 4 まで)・request の結果要約(set-cookie / 反射トークン)を既定マスク。マスクマーカーは percent-encode 耐性のある ASCII `[MASKED]`。**URL パスセグメントの値(/verify/<値>)はキー名がなく検出不能** → --deny で潰す(docs 明記済み)。curl 生成は Content-Type 未記録の JSON ボディに application/json を補完する。
 - `src/daemon/journal.ts` — セッション別ジャーナル。`~/.kb/logs/<session>/events.jsonl` + meta.json に逐次追記。デーモン起動で自動開始(既定常時 ON)+ **古いセッションを prune**(既定 直近 20、KB_LOG_KEEP で変更)。main.ts が dispatch をラップして command イベントを記録(JOURNAL_EXCLUDE で読み取り系を除外)、host のフック(onJournalNet / onJournalConsole)が通信(xhr/fetch/document/other、allHeaders+postData 付き)とコンソールを記録。`kb log start --shots` で操作(AUTO_SHOT_CMDS)直後の自動スクショを `shots/auto-N.png` に保存しイベントの `shot` に紐付け。`kb log replay` は生ジャーナルの command イベント(REPLAY_CMDS、tab 指定はアクティブタブに読み替え)を順に RPC 再実行する。
@@ -57,7 +63,7 @@ kb text                         # 結果を読む(既定 20000 文字、--offset
 
 ## エージェント運用の注意(Claude Code から使うとき)
 
-- **ref はページ遷移・DOM 変化で失効する。** 操作やナビゲーションの後は `kb snapshot` を取り直す。失効した ref は**同じ role/name の要素が一意に見つかれば自動で新 ref に再解決して操作される**(応答の `reResolvedRef` で分かる)。一意に決まらない場合はヒント付きエラーが返るので snapshot を取り直す。host が直近 snapshot をタブ毎にキャッシュして照合している(実装は `act()` / `reResolveRef()`)。
+- **ref はページ遷移・DOM 変化で失効する。** 操作やナビゲーションの後は `kb snapshot` を取り直す。失効した ref は**同じ role/name の要素が一意に見つかれば自動で新 ref に再解決して操作される**(応答の `reResolvedRef` で分かる)。一意に決まらない場合はヒント付きエラーが返るので snapshot を取り直す。直近 snapshot をタブ毎にキャッシュして照合している(実装は `src/daemon/targets.ts` の `act()` / `reResolveRef()`)。
 - **Bash ツールのタイムアウトに注意。** `kb wait`(既定 90 秒)や `--wait idle` を使うときは、Bash 側の timeout をそれより長く設定する(Bash 既定は 120 秒)。
 - **`-f`(follow)は終了しないコマンド。** エージェントは `-f` 単体を使わず、`-n <件数>` での取得か `-f --for <sec>`(指定秒数で自動終了)を使う。
 - **並列実行時はタブを明示する。** タブ省略時は「アクティブタブ」を共有するため、独立コマンドを並列に投げるときは各コマンドに `-t <id>` を付ける。
@@ -74,6 +80,7 @@ kb wait [--url "**dashboard**"] [--selector h1] [--idle] [--any] [--timeout 120]
 kb emulate ua "<UA>" / viewport 390x844 [--dpr 3 --mobile] / tz America/New_York / geo 35.68 139.76 / net slow3g / reset
 ```
 
+- `kb daemon start --stealth [--ua "<実Chrome UA>"]` — 自動化の痕跡(navigator.webdriver 等)を実 Chrome 相当に均す。認可されたテスト向け。明示 start では `--stealth` を付けたときだけ有効(headless と同じく last-run は自動 spawn のみ継承)。`--cdp` アタッチとは排他(アタッチ先は元から実ブラウザ)。webdriver 消しは効くが JA3/IP 等のサーバ側判定は別レイヤなので、Cloudflare Managed Challenge 突破の保証はない(そこが要るときは `--cdp` で自分が起動した実 Chrome に繋ぐのが確実)。
 - 手動介入の運用: headed のままユーザーがウィンドウを直接操作 → agent は `kb wait --url ...` で完了を検知して再開。ログイン済み状態は `kb storage dump` で保存できる。
 - `kb login [url] [--until <glob>] [--save <file>]` — 手動サインインの段取りを 1 コマンド化(headless なら headed へ切替 → URL を開く → `--until` の URL glob 一致か Enter 押下で完了 → 保存状態を確認)。ログイン状態はプロファイル(user-data-dir)に自動永続化されるので、次回以降のセッションは何もしなくてもログイン済みで始まる。非 TTY では `--until` 必須。
 - エミュレーションはタブ単位(geo のみ context 全体)。CDP セッションを detach するとオーバーライドが消えるため、host が CDPSession をタブ毎に保持し続ける実装になっている。UA 上書き時は Client Hints メタデータも追随、mobile viewport はタッチも有効化。

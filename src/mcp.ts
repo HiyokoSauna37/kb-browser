@@ -7,6 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { rpc } from './shared/client';
 import { loadProxyConfig, saveProxyConfig } from './shared/proxyStore';
+import { KB_VERSION } from './shared/version';
 
 /**
  * kb デーモンの機能を MCP tools として公開する stdio サーバ。
@@ -14,7 +15,7 @@ import { loadProxyConfig, saveProxyConfig } from './shared/proxyStore';
  * 登録例: claude mcp add kb -- kb-mcp
  */
 
-const server = new McpServer({ name: 'kb-browser', version: '0.6.2' });
+const server = new McpServer({ name: 'kb-browser', version: KB_VERSION });
 
 type ToolResult = {
   content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[];

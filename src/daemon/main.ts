@@ -9,10 +9,12 @@ import { clipStr, summarizeArgs } from '../shared/oplog';
 import {
   DAEMON_LOG_PATH,
   ensureKbHome,
+  readDiskBuildId,
   removeDaemonInfoIfOwned,
   writeDaemonInfo,
   writeLastRun,
 } from '../shared/paths';
+import { KB_VERSION } from '../shared/version';
 
 interface RpcRequest {
   cmd: string;
@@ -46,6 +48,7 @@ async function main(): Promise<void> {
   const channel = argValue('--channel') as 'chrome' | 'msedge' | 'chromium' | undefined;
   const userAgent = argValue('--ua');
   const cdpUrl = argValue('--cdp');
+  const stealth = process.argv.includes('--stealth');
 
   const host = new BrowserHost();
   const relay = new RelayProxy();
@@ -288,13 +291,13 @@ async function main(): Promise<void> {
         return host.domQuery(args.selector, args, args.tab);
       case 'mode.set': {
         const result = await host.setMode(!!args.headless);
-        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent });
+        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth });
         log(`mode switched: headless=${result.headless} (restored ${result.restoredTabs} tabs)`);
         return result;
       }
       case 'profile.set': {
         const result = await host.setProfile(args.name);
-        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent });
+        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth });
         log(`profile switched: ${result.profile} (restored ${result.restoredTabs} tabs)`);
         return result;
       }
@@ -353,7 +356,7 @@ async function main(): Promise<void> {
 
   log(
     `starting (headless=${headless}, profile=${profile}, channel=${channel ?? 'auto'}, ua=${userAgent ? 'custom' : 'default'}, ` +
-      `attach=${cdpUrl ?? 'no'}, proxy=${relay.status().active}, relayPort=${relayPort}, relayAuth=${!!relayAuth})`,
+      `stealth=${stealth}, attach=${cdpUrl ?? 'no'}, proxy=${relay.status().active}, relayPort=${relayPort}, relayAuth=${!!relayAuth})`,
   );
   await host.start({
     headless,
@@ -361,11 +364,12 @@ async function main(): Promise<void> {
     channel,
     userAgent,
     cdpUrl,
+    stealth,
     // アタッチ先ブラウザのプロキシは変更できないため、通常起動時のみ中継を向ける
     proxy: cdpUrl ? undefined : { server: `http://127.0.0.1:${relayPort}`, ...(relayAuth ?? {}) },
   });
   // アタッチは明示起動のみの契約(自動 spawn が存在しない Chrome への接続で失敗しないよう last-run に残さない)
-  if (!cdpUrl) writeLastRun({ headless, profile, channel, userAgent });
+  if (!cdpUrl) writeLastRun({ headless, profile, channel, userAgent, stealth });
 
   /** 操作ログセッションの meta(log.start でも使う)。 */
   const sessionMeta = () => ({
@@ -373,7 +377,7 @@ async function main(): Promise<void> {
     headless: host.headless,
     channel: host.channel,
     ...(cdpUrl ? { attach: cdpUrl } : {}),
-    kbVersion: '0.6.2',
+    kbVersion: KB_VERSION,
   });
 
   // 生ジャーナルには機微な値が平文で残るため、古いセッションは自動削除する(既定: 直近 20)
@@ -393,13 +397,8 @@ async function main(): Promise<void> {
       log('failed to get listen address');
       process.exit(1);
     }
-    let buildId: number | undefined;
-    try {
-      buildId = Math.floor(fs.statSync(__filename).mtimeMs);
-    } catch {
-      /* buildId は警告用の補助情報にすぎない */
-    }
-    writeDaemonInfo({ port: address.port, token, pid: process.pid, buildId });
+    // buildId は警告用の補助情報にすぎない(読めなければ undefined のまま)
+    writeDaemonInfo({ port: address.port, token, pid: process.pid, buildId: readDiskBuildId() ?? undefined });
     log(`listening on 127.0.0.1:${address.port} (pid=${process.pid}, channel=${host.channel})`);
   });
 

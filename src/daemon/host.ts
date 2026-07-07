@@ -1,128 +1,38 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {
-  chromium,
-  type Browser,
-  type BrowserContext,
-  type CDPSession,
-  type Locator,
-  type Page,
-  type Request,
-  type Response,
-  type Route,
-} from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { DOWNLOADS_DIR, PROFILES_DIR } from '../shared/paths';
-import { BodyStore, clip, escapeRegExp, inferJsonContentType, LogBuffer, normalizeUrl, prepareEval } from '../shared/util';
+import { clip, inferJsonContentType, LogBuffer, normalizeUrl, prepareEval } from '../shared/util';
+import { Emulator } from './emulation';
+import { NetMonitor } from './netMonitor';
+import { TargetResolver } from './targets';
+import {
+  LOG_CAP,
+  TEXT_CAP,
+  TEXT_CONTENT_RE,
+  type ActionResult,
+  type ConsoleEntry,
+  type DownloadInfo,
+  type HostOptions,
+  type NetEntry,
+  type RouteRule,
+  type TabInfo,
+  type Target,
+} from './types';
 
-export interface HostOptions {
-  headless: boolean;
-  profile: string;
-  /** ローカル中継プロキシ (例: { server: "http://127.0.0.1:12345", username, password })。全タブがここを経由する。 */
-  proxy?: { server: string; username?: string; password?: string };
-  /** 対象サイトの Basic 認証 (context オプションのため変更には再起動が必要)。 */
-  httpCredentials?: { username: string; password: string };
-  /** 起動チャネルの明示指定。省略時は chrome → msedge → 同梱 chromium の順に自動選択。 */
-  channel?: 'chrome' | 'msedge' | 'chromium';
-  /** context 全体の User-Agent 上書き(headless の "HeadlessChrome" 対策など)。 */
-  userAgent?: string;
-  /** 既存ブラウザへのアタッチ (connectOverCDP)。指定時は launch せずこの CDP エンドポイントへ接続する。 */
-  cdpUrl?: string;
-}
+// 型はデーモン内で共有するため types.ts にあるが、従来どおり host からも参照できるようにする
+export type { ActionResult, ConsoleEntry, DownloadInfo, HostOptions, NetEntry, RouteRule, TabInfo, Target };
 
-export interface TabInfo {
-  id: number;
-  url: string;
-  title: string;
-  active: boolean;
-}
-
-export interface NetEntry {
-  seq: number;
-  ts: string;
-  tab: number;
-  event: 'request' | 'response' | 'requestfailed';
-  method: string;
-  url: string;
-  resourceType: string;
-  status?: number;
-  failure?: string;
-}
-
-export interface ConsoleEntry {
-  seq: number;
-  ts: string;
-  tab: number;
-  kind: string;
-  text: string;
-}
-
-export interface RouteRule {
-  id: number;
-  pattern: string;
-  action: 'block' | 'mock';
-  status?: number;
-  contentType?: string;
-}
-
-export interface DownloadInfo {
-  id: number;
-  ts: string;
-  tab: number;
-  url: string;
-  file: string;
-  state: 'saving' | 'saved' | 'failed';
-  error?: string;
-}
-
-/** 操作対象の指定。ref は kb snapshot が出力する要素参照 (例: "e12", iframe 内は "f1e3")。 */
-export interface Target {
-  selector?: string;
-  ref?: string;
-  /** iframe の CSS セレクタ。selector をこのフレーム内で解決する。 */
-  frame?: string;
-  tab?: number;
-}
-
-/** 操作後にエージェントへ返す現在地。 */
-export interface ActionResult {
-  url: string;
-  title: string;
-  /** 失効した ref を role/name の一致で新しい ref に自動再解決して操作した場合に入る。 */
-  reResolvedRef?: { from: string; to: string };
-}
-
-/** リングバッファの上限。超えた分は古いものから捨てる。 */
-const LOG_CAP = 3000;
-/** HAR に本文を含めるサイズ上限。 */
-const HAR_BODY_CAP = 256 * 1024;
-/** net body 捕捉のエントリあたりサイズ上限(超過分は先頭のみ保持)。 */
-const NET_BODY_CAP = 256 * 1024;
-/** net body ストア全体の上限(件数 / バイト数)。超えたら古い本文から捨てる。 */
-const NET_BODY_MAX_COUNT = 500;
-const NET_BODY_MAX_BYTES = 32 * 1024 * 1024;
-/** 本文を捕捉するテキスト系 Content-Type。 */
-const TEXT_CONTENT_RE = /text|json|javascript|xml|html|css|svg|form-urlencoded/;
-/** 本文を捕捉するリソース種別(API デバッグ用途。画像や大量の静的アセットは対象外)。 */
-const BODY_RESOURCE_TYPES = new Set(['xhr', 'fetch', 'document', 'other']);
-/** 全ヘッダ捕捉の保持件数上限(kb net headers 用。全レスポンスが対象)。 */
-const NET_HEADERS_MAX = 2000;
-/** text / html / snapshot のデフォルト出力上限(コンテキスト溢れ防止)。--max-chars 0 で無制限。 */
-const TEXT_CAP = 20_000;
 /** dom query --html の要素あたり outerHTML 上限。 */
 const DOM_HTML_CAP = 2_000;
 /** 操作系のデフォルトタイムアウト。 */
 const ACTION_TIMEOUT = 10_000;
 
-const NETWORK_PRESETS: Record<string, { offline: boolean; latency: number; downloadThroughput: number; uploadThroughput: number }> = {
-  offline: { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 },
-  slow3g: { offline: false, latency: 400, downloadThroughput: (500 * 1024) / 8, uploadThroughput: (500 * 1024) / 8 },
-  fast3g: { offline: false, latency: 150, downloadThroughput: (1.6 * 1024 * 1024) / 8, uploadThroughput: (750 * 1024) / 8 },
-  reset: { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 },
-};
-
 /**
  * Chromium(persistent context)を保持し、タブを ID で管理するブラウザホスト。
  * channel は chrome → msedge → 同梱 chromium の順でフォールバックする。
+ * ネットワーク監視は NetMonitor、エミュレーションは Emulator、
+ * ref の解決・自動再解決は TargetResolver に委譲する。
  */
 export class BrowserHost {
   private context!: BrowserContext;
@@ -134,28 +44,16 @@ export class BrowserHost {
   private nextTabId = 1;
   private activeTabId: number | null = null;
 
-  private netLog = new LogBuffer<NetEntry>(LOG_CAP);
-  /** 捕捉したレスポンス本文。キーは response エントリの seq。 */
-  private netBodies = new BodyStore<{ body: Buffer; contentType: string; fullBytes: number }>(
-    NET_BODY_MAX_COUNT,
-    NET_BODY_MAX_BYTES,
-  );
-  /** 捕捉した全ヘッダ(kb net headers 用)。キーは response エントリの seq。挿入順で NET_HEADERS_MAX に切り詰め。 */
-  private netHeaders = new Map<number, { request: Record<string, string>; response: Record<string, string> }>();
+  private net = new NetMonitor();
+  private emulator = new Emulator();
+  private targets = new TargetResolver();
   private consoleLog = new LogBuffer<ConsoleEntry>(LOG_CAP);
-  private routes = new Map<number, RouteRule & { handler: (route: Route) => void }>();
-  private nextRouteId = 1;
-  private har: { startedAt: string; entries: unknown[] } | null = null;
   private downloads: DownloadInfo[] = [];
   private nextDownloadId = 1;
 
   private opts!: HostOptions;
   /** mode/profile/auth 切替による再起動中は context 'close' でのデーモン終了を抑止する。 */
   private restarting = false;
-  /** エミュレーション用 CDP セッション。detach するとオーバーライドが解除されるためタブ毎に保持する。 */
-  private cdpSessions = new Map<number, CDPSession>();
-  /** タブ毎の直近 snapshot(全文)。失効 ref の自動再解決(role/name 照合)に使う。 */
-  private lastSnapshots = new Map<number, string>();
 
   channel = 'bundled chromium';
   headless = false;
@@ -165,23 +63,18 @@ export class BrowserHost {
   onClosed: () => void = () => {};
 
   /** 操作ジャーナル用フック(main.ts が設定)。xhr/fetch/document/other の通信を全ヘッダ付きで通知する。 */
-  onJournalNet: (ev: {
-    method: string;
-    url: string;
-    status: number;
-    resourceType: string;
-    tab: number;
-    requestHeaders: Record<string, string>;
-    postData?: string;
-    contentType?: string;
-  }) => void = () => {};
+  set onJournalNet(fn: NetMonitor['onJournalNet']) {
+    this.net.onJournalNet = fn;
+  }
 
   /** 操作ジャーナル用フック(main.ts が設定)。コンソール出力・ページエラーを通知する。 */
   onJournalConsole: (ev: { kind: string; text: string; tab: number }) => void = () => {};
 
   async start(opts: HostOptions): Promise<void> {
-    this.opts = opts;
-    await this.launch(opts);
+    // アタッチ(--cdp)では stealth の起動フラグも init 相当も適用できない。CLI でも排他だが、
+    // 別経路(デーモン直接起動等)で両方来ても status() が嘘をつかないよう stealth を落として正規化する。
+    this.opts = opts.cdpUrl ? { ...opts, stealth: false } : opts;
+    await this.launch(this.opts);
   }
 
   private async launch(opts: HostOptions): Promise<void> {
@@ -201,7 +94,7 @@ export class BrowserHost {
     });
 
     // block / mock ルールは context 単位なので再起動時に引き継ぐ
-    for (const rule of this.routes.values()) await this.context.route(rule.pattern, rule.handler);
+    await this.net.reapplyRoutes(this.context);
   }
 
   /** 自前でブラウザを起動する(通常モード)。channel 明示指定時はフォールバックしない。 */
@@ -221,6 +114,10 @@ export class BrowserHost {
           proxy: opts.proxy,
           httpCredentials: opts.httpCredentials,
           userAgent: opts.userAgent,
+          // ステルス: navigator.webdriver を実 Chrome 同様に消す(JS で defineProperty するより
+          // フラグで生やさない方が痕跡が残らない)。計測上、これだけで chrome チャネルの
+          // JS レベルの自動化シグナルはほぼ実 Chrome と一致する。
+          args: opts.stealth ? ['--disable-blink-features=AutomationControlled'] : undefined,
         });
         this.channel = channel ?? 'bundled chromium';
         launched = true;
@@ -291,8 +188,8 @@ export class BrowserHost {
     try {
       await this.context.close();
       this.tabs.clear();
-      this.cdpSessions.clear();
-      this.lastSnapshots.clear();
+      this.emulator.clear();
+      this.targets.clear();
       this.activeTabId = null;
       this.opts = { ...this.opts, ...patch };
       await this.launch(this.opts);
@@ -369,43 +266,16 @@ export class BrowserHost {
     if (this.activeTabId == null) this.activeTabId = id;
     page.on('close', () => {
       this.tabs.delete(id);
-      this.cdpSessions.delete(id);
-      this.lastSnapshots.delete(id);
+      this.emulator.dropTab(id);
+      this.targets.dropTab(id);
       if (this.activeTabId === id) {
         const remaining = [...this.tabs.keys()];
         this.activeTabId = remaining.length ? remaining[remaining.length - 1] : null;
       }
     });
 
-    page.on('request', (req) =>
-      this.netLog.push({ ts: new Date().toISOString(), tab: id, event: 'request', method: req.method(), url: req.url(), resourceType: req.resourceType() }),
-    );
-    page.on('response', (res) => {
-      const req = res.request();
-      const entry = this.netLog.push({
-        ts: new Date().toISOString(),
-        tab: id,
-        event: 'response',
-        method: req.method(),
-        url: res.url(),
-        status: res.status(),
-        resourceType: req.resourceType(),
-      });
-      if (this.har) void this.captureHarEntry(res);
-      void this.captureNetBody(entry.seq, res, req.resourceType());
-      void this.captureNetHeaders(entry.seq, req, res, id);
-    });
-    page.on('requestfailed', (req) =>
-      this.netLog.push({
-        ts: new Date().toISOString(),
-        tab: id,
-        event: 'requestfailed',
-        method: req.method(),
-        url: req.url(),
-        resourceType: req.resourceType(),
-        failure: req.failure()?.errorText,
-      }),
-    );
+    this.net.watchPage(page, id);
+
     page.on('console', (msg) => {
       this.consoleLog.push({ ts: new Date().toISOString(), tab: id, kind: msg.type(), text: msg.text() });
       this.onJournalConsole({ kind: msg.type(), text: msg.text(), tab: id });
@@ -440,91 +310,6 @@ export class BrowserHost {
     const page = this.tabs.get(id);
     if (!page) throw new Error(`タブ ${id} は存在しません。kb tabs で確認してください。`);
     return { id, page };
-  }
-
-  /** Target(selector / ref / frame)から Locator を解決する。 */
-  private loc(page: Page, t: Target): Locator {
-    if (t.ref) return page.locator(`aria-ref=${t.ref}`);
-    if (!t.selector) throw new Error('selector か --ref のどちらかを指定してください。ref は kb snapshot で取得できます。');
-    if (t.frame) return page.frameLocator(t.frame).locator(t.selector).first();
-    return page.locator(t.selector).first();
-  }
-
-  /**
-   * 要素操作を実行する。ref 操作がタイムアウトした場合は、直近の snapshot から
-   * 同じ role/name の要素を新しい snapshot で探し、新 ref で 1 回だけリトライする
-   * (SPA の再レンダで ref が失効しても、要素自体が残っていれば操作が通る)。
-   * それでも失敗したら、エージェントが次に取るべき行動をヒントとして付ける。
-   */
-  private async act<T>(
-    page: Page,
-    tabId: number,
-    t: Target,
-    fn: (loc: Locator) => Promise<T>,
-  ): Promise<{ value: T; reResolved?: { from: string; to: string } }> {
-    let target = t;
-    let reResolved: { from: string; to: string } | undefined;
-    // ref が既に失効している(要素が見つからない)ならタイムアウトを待たずに即再解決する
-    if (t.ref && (await this.loc(page, t).count().catch(() => 0)) === 0) {
-      const newRef = await this.reResolveRef(page, tabId, t.ref).catch(() => null);
-      if (!newRef) {
-        // ref は snapshot 時点の要素インスタンスに紐づくため、待っても現れない。即エラーにする
-        throw new Error(
-          `ref "${t.ref}" の要素が見つかりません。ref はページ遷移や DOM 変化で失効します(自動再解決も一意に決まりませんでした)。kb snapshot を取り直して最新の ref を使ってください。`,
-        );
-      }
-      target = { ...t, ref: newRef };
-      reResolved = { from: t.ref, to: newRef };
-    }
-    try {
-      return { value: await fn(this.loc(page, target)), reResolved };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!/Timeout \d+ms exceeded/i.test(msg)) throw err;
-      if (t.ref && !reResolved) {
-        // count() では存在して見えたが操作はタイムアウトした場合の遅い再解決パス。
-        // 再 snapshot は ref の紐付け自体を更新するため、同じ ref 番号が返っても再試行する価値がある
-        const newRef = await this.reResolveRef(page, tabId, t.ref).catch(() => null);
-        if (newRef) {
-          try {
-            const value = await fn(this.loc(page, { ...t, ref: newRef }));
-            return { value, reResolved: { from: t.ref, to: newRef } };
-          } catch {
-            /* 再解決先でも失敗 → 下のヒント付きエラーへ */
-          }
-        }
-      }
-      const hint = t.ref
-        ? `ref "${t.ref}" の要素が見つかりません。ref はページ遷移や DOM 変化で失効します(自動再解決も一意に決まりませんでした)。kb snapshot を取り直して最新の ref を使ってください。`
-        : `要素が見つからないか操作できない状態です。kb snapshot でページ構造を確認してください。`;
-      throw new Error(`${hint}\n(${msg.split('\n')[0]})`);
-    }
-  }
-
-  /**
-   * 失効した ref を再解決する。直近の snapshot キャッシュから旧 ref の行(role と
-   * アクセシブルネーム)を取り出し、新しい snapshot で同じ role/name の行が
-   * ちょうど 1 つのときだけ、その ref を返す(曖昧なら null)。
-   */
-  private async reResolveRef(page: Page, tabId: number, oldRef: string): Promise<string | null> {
-    const prev = this.lastSnapshots.get(tabId);
-    if (!prev) return null;
-    const oldLine = prev.split('\n').find((l) => l.includes(`[ref=${oldRef}]`));
-    if (!oldLine) return null;
-    // 行の形式: `- button "Submit" [ref=e12]`。name のない要素は誤爆しやすいので対象外
-    const parsed = /-\s+([a-zA-Z]+)\s+"([^"]+)"/.exec(oldLine);
-    if (!parsed) return null;
-    let snap: string;
-    try {
-      snap = await page.locator('body').ariaSnapshot({ mode: 'ai' });
-    } catch {
-      return null;
-    }
-    this.lastSnapshots.set(tabId, snap);
-    const lineRe = new RegExp(`-\\s+${escapeRegExp(parsed[1])}\\s+"${escapeRegExp(parsed[2])}".*\\[ref=([a-zA-Z0-9]+)\\]`);
-    const hits = snap.split('\n').filter((l) => lineRe.test(l));
-    if (hits.length !== 1) return null;
-    return lineRe.exec(hits[0])![1];
   }
 
   /** 操作後の現在地(URL / タイトル)。ナビゲーション中なら少し待つ。 */
@@ -593,7 +378,7 @@ export class BrowserHost {
     const { id, page } = this.getPage(tabId);
     if (opts.selector || opts.ref) {
       const t: Target = { selector: opts.selector, ref: opts.ref, frame: opts.frame };
-      await this.act(page, id, t, (loc) => loc.screenshot({ path: outPath, timeout: opts.timeoutMs ?? ACTION_TIMEOUT }));
+      await this.targets.act(page, id, t, (loc) => loc.screenshot({ path: outPath, timeout: opts.timeoutMs ?? ACTION_TIMEOUT }));
     } else {
       // 重い SPA でフォント読み込み等の安定待ちが 30 秒(既定)を超えることがあるため timeout を指定可能にする
       await page.screenshot({ path: outPath, fullPage: !!opts.full, ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}) });
@@ -633,7 +418,7 @@ export class BrowserHost {
     let snap: string;
     try {
       snap = await page.locator('body').ariaSnapshot({ mode: 'ai' });
-      this.lastSnapshots.set(id, snap); // 失効 ref の自動再解決用に全文をキャッシュ
+      this.targets.cacheSnapshot(id, snap); // 失効 ref の自動再解決用に全文をキャッシュ
     } catch {
       // 古い Playwright へのフォールバック(ref なし)
       snap = await page.locator('body').ariaSnapshot();
@@ -679,13 +464,13 @@ export class BrowserHost {
 
   async click(t: Target): Promise<ActionResult> {
     const { id, page } = this.getPage(t.tab);
-    const r = await this.act(page, id, t, (loc) => loc.click({ timeout: ACTION_TIMEOUT }));
+    const r = await this.targets.act(page, id, t, (loc) => loc.click({ timeout: ACTION_TIMEOUT }));
     return this.acted(page, r);
   }
 
   async fill(t: Target, value: string): Promise<ActionResult> {
     const { id, page } = this.getPage(t.tab);
-    const r = await this.act(page, id, t, (loc) => loc.fill(value, { timeout: ACTION_TIMEOUT }));
+    const r = await this.targets.act(page, id, t, (loc) => loc.fill(value, { timeout: ACTION_TIMEOUT }));
     return this.acted(page, r);
   }
 
@@ -697,19 +482,19 @@ export class BrowserHost {
 
   async hover(t: Target): Promise<ActionResult> {
     const { id, page } = this.getPage(t.tab);
-    const r = await this.act(page, id, t, (loc) => loc.hover({ timeout: ACTION_TIMEOUT }));
+    const r = await this.targets.act(page, id, t, (loc) => loc.hover({ timeout: ACTION_TIMEOUT }));
     return this.acted(page, r);
   }
 
   async setChecked(t: Target, checked: boolean): Promise<ActionResult> {
     const { id, page } = this.getPage(t.tab);
-    const r = await this.act(page, id, t, (loc) => loc.setChecked(checked, { timeout: ACTION_TIMEOUT }));
+    const r = await this.targets.act(page, id, t, (loc) => loc.setChecked(checked, { timeout: ACTION_TIMEOUT }));
     return this.acted(page, r);
   }
 
   async select(t: Target, values: string[], byLabel: boolean): Promise<ActionResult & { selected: string[] }> {
     const { id, page } = this.getPage(t.tab);
-    const r = await this.act(page, id, t, (loc) =>
+    const r = await this.targets.act(page, id, t, (loc) =>
       byLabel
         ? loc.selectOption(values.map((label) => ({ label })), { timeout: ACTION_TIMEOUT })
         : loc.selectOption(values, { timeout: ACTION_TIMEOUT }),
@@ -719,7 +504,7 @@ export class BrowserHost {
 
   async upload(t: Target, files: string[]): Promise<ActionResult & { files: number }> {
     const { id, page } = this.getPage(t.tab);
-    const r = await this.act(page, id, t, (loc) => loc.setInputFiles(files, { timeout: ACTION_TIMEOUT }));
+    const r = await this.targets.act(page, id, t, (loc) => loc.setInputFiles(files, { timeout: ACTION_TIMEOUT }));
     return { files: files.length, ...(await this.acted(page, r)) };
   }
 
@@ -729,7 +514,7 @@ export class BrowserHost {
   ): Promise<{ scrollY: number }> {
     const { id, page } = this.getPage(tabId);
     if (opts.to) {
-      await this.act(page, id, { selector: opts.to }, (loc) => loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT }));
+      await this.targets.act(page, id, { selector: opts.to }, (loc) => loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT }));
     } else if (opts.top) {
       await page.evaluate(() => window.scrollTo(0, 0));
     } else if (opts.bottom) {
@@ -839,198 +624,58 @@ export class BrowserHost {
     return { cookies: state.cookies?.length ?? 0, origins: restored, skippedOrigins: skipped };
   }
 
-  // ---- ネットワーク監視・改変 (DevTools Network 相当) ----
+  // ---- ネットワーク監視・改変 (NetMonitor へ委譲) ----
 
   netLogQuery(opts: { tab?: number; since?: number; filter?: string; limit?: number; responsesOnly?: boolean }): {
     entries: NetEntry[];
     seq: number;
     dropped: number;
   } {
-    const re = opts.filter ? new RegExp(opts.filter, 'i') : null;
-    return this.netLog.query({
-      since: opts.since,
-      limit: opts.limit,
-      filter: (e) =>
-        (opts.tab == null || e.tab === opts.tab) &&
-        (re == null || re.test(e.url)) &&
-        // --responses: 送信相 (request) を省き、完了相 (response / requestfailed) の 1 行だけにする
-        (!opts.responsesOnly || e.event !== 'request'),
-    });
+    return this.net.query(opts);
   }
 
   netClear(): void {
-    this.netLog.clear();
+    this.net.clear();
   }
 
   async addBlock(pattern: string): Promise<RouteRule> {
-    const handler = (route: Route) => void route.abort();
-    await this.context.route(pattern, handler);
-    const rule = { id: this.nextRouteId++, pattern, action: 'block' as const };
-    this.routes.set(rule.id, { ...rule, handler });
-    return rule;
+    return this.net.addBlock(this.context, pattern);
   }
 
   async addMock(pattern: string, status: number, contentType: string, body: string): Promise<RouteRule> {
-    const handler = (route: Route) => void route.fulfill({ status, contentType, body });
-    await this.context.route(pattern, handler);
-    const rule = { id: this.nextRouteId++, pattern, action: 'mock' as const, status, contentType };
-    this.routes.set(rule.id, { ...rule, handler });
-    return rule;
+    return this.net.addMock(this.context, pattern, status, contentType, body);
   }
 
   listRoutes(): RouteRule[] {
-    return [...this.routes.values()].map(({ handler: _h, ...rule }) => rule);
+    return this.net.listRoutes();
   }
 
   async removeRoute(id: number): Promise<void> {
-    const rule = this.routes.get(id);
-    if (!rule) throw new Error(`ルール ${id} は存在しません。kb net rules で確認してください。`);
-    await this.context.unroute(rule.pattern, rule.handler);
-    this.routes.delete(id);
+    return this.net.removeRoute(this.context, id);
   }
 
   async removeAllRoutes(): Promise<{ removed: number }> {
-    const n = this.routes.size;
-    for (const rule of this.routes.values()) await this.context.unroute(rule.pattern, rule.handler);
-    this.routes.clear();
-    return { removed: n };
+    return this.net.removeAllRoutes(this.context);
   }
 
-  /**
-   * レスポンス本文を捕捉する(kb net body 用)。API デバッグが目的なので、
-   * テキスト系 Content-Type の XHR / fetch / document / other のみ対象。
-   * サイズ・件数はストア側で上限管理される。
-   */
-  private async captureNetBody(seq: number, res: Response, resourceType: string): Promise<void> {
-    if (!BODY_RESOURCE_TYPES.has(resourceType)) return;
-    const contentType = res.headers()['content-type'] ?? '';
-    if (!TEXT_CONTENT_RE.test(contentType)) return;
-    try {
-      const body = await res.body();
-      this.netBodies.set(seq, {
-        body: body.length > NET_BODY_CAP ? body.subarray(0, NET_BODY_CAP) : body,
-        contentType,
-        fullBytes: body.length,
-      });
-    } catch {
-      /* ナビゲーション後は body が取れないことがある */
-    }
+  netBody(seq: number, opts: { maxChars?: number; offset?: number } = {}): ReturnType<NetMonitor['body']> {
+    return this.net.body(seq, opts);
   }
 
-  /**
-   * seq からログエントリを引く。request 行の seq が渡された場合は、
-   * 対応する response(同タブ・同 URL で seq がより大きい最初のもの)へ自動で読み替える。
-   */
-  private resolveResponseSeq(seq: number): { seq: number; entry?: NetEntry } {
-    const entry = this.netLog.query({ filter: (e) => e.seq === seq }).entries[0];
-    if (entry?.event === 'request') {
-      const resp = this.netLog.query({
-        filter: (e) => e.event === 'response' && e.tab === entry.tab && e.url === entry.url && e.seq > seq,
-      }).entries[0];
-      if (resp) return { seq: resp.seq, entry: resp };
-    }
-    return { seq, entry };
+  netHeadersQuery(seq: number): ReturnType<NetMonitor['headers']> {
+    return this.net.headers(seq);
   }
 
-  /**
-   * 捕捉済みのレスポンス本文を返す。seq は kb net log の行頭に出る番号
-   * (request 行の seq でも対応する response に自動で読み替える)。
-   */
-  netBody(
-    seq: number,
-    opts: { maxChars?: number; offset?: number } = {},
-  ): {
-    seq: number;
-    url?: string;
-    status?: number;
-    contentType: string;
-    fullBytes: number;
-    capturedTruncated: boolean;
-    body: string;
-    totalChars: number;
-    offset: number;
-    truncated: boolean;
-  } {
-    const resolved = this.resolveResponseSeq(seq);
-    seq = resolved.seq;
-    const entry = resolved.entry;
-    const stored = this.netBodies.get(seq);
-    if (!stored) {
-      const reason = entry
-        ? `seq ${seq} の本文は捕捉されていません(対象はテキスト系の XHR/fetch/document。古い本文は容量上限で破棄されます)`
-        : `seq ${seq} のログはありません(バッファから消えた可能性があります)`;
-      throw new Error(`${reason}。kb net log --filter <regex> で response 行の seq を確認してください。`);
-    }
-    const text = stored.body.toString('utf8');
-    const clipped = clip(text, { maxChars: opts.maxChars ?? TEXT_CAP, offset: opts.offset });
-    return {
-      seq,
-      url: entry?.url,
-      status: entry?.status,
-      contentType: stored.contentType,
-      fullBytes: stored.fullBytes,
-      capturedTruncated: stored.fullBytes > stored.body.length,
-      body: clipped.text,
-      totalChars: clipped.totalChars,
-      offset: clipped.offset,
-      truncated: clipped.truncated,
-    };
+  harStart(): { recording: boolean } {
+    return this.net.harStart();
   }
 
-  /** 全ヘッダ(Cookie 等の CDP extra info 含む)を捕捉する。kb net headers と操作ジャーナル用。 */
-  private async captureNetHeaders(seq: number, req: Request, res: Response, tabId: number): Promise<void> {
-    try {
-      const [request, response] = await Promise.all([req.allHeaders(), res.allHeaders()]);
-      // kb 内部の中継プロキシ認証(セッショントークン)はサイト通信と無関係なので露出させない
-      delete request['proxy-authorization'];
-      this.netHeaders.set(seq, { request, response });
-      for (const key of this.netHeaders.keys()) {
-        if (this.netHeaders.size <= NET_HEADERS_MAX) break;
-        this.netHeaders.delete(key);
-      }
-      const resourceType = req.resourceType();
-      if (BODY_RESOURCE_TYPES.has(resourceType)) {
-        this.onJournalNet({
-          method: req.method(),
-          url: res.url(),
-          status: res.status(),
-          resourceType,
-          tab: tabId,
-          requestHeaders: request,
-          postData: req.postData() ?? undefined,
-          contentType: response['content-type'],
-        });
-      }
-    } catch {
-      /* ナビゲーション後は取れないことがある */
-    }
+  harStop(): unknown {
+    return this.net.harStop();
   }
 
-  /** 捕捉済みの全リクエスト/レスポンスヘッダを返す。seq は kb net log の行頭の番号。 */
-  netHeadersQuery(seq: number): {
-    seq: number;
-    url?: string;
-    method?: string;
-    status?: number;
-    request: Record<string, string>;
-    response: Record<string, string>;
-  } {
-    const { seq: resolvedSeq, entry } = this.resolveResponseSeq(seq);
-    const stored = this.netHeaders.get(resolvedSeq);
-    if (!stored) {
-      const reason = entry
-        ? `seq ${seq} のヘッダは記録されていません(直近 ${NET_HEADERS_MAX} レスポンスまで保持)`
-        : `seq ${seq} のログはありません(バッファから消えた可能性があります)`;
-      throw new Error(`${reason}。kb net log で response 行の seq を確認してください。`);
-    }
-    return {
-      seq: resolvedSeq,
-      url: entry?.url,
-      method: entry?.method,
-      status: entry?.status,
-      request: stored.request,
-      response: stored.response,
-    };
+  harStatus(): { recording: boolean; entries: number } {
+    return this.net.harStatus();
   }
 
   // ---- HTTP リクエスト (ページ非依存のミニ REST クライアント) ----
@@ -1107,82 +752,6 @@ export class BrowserHost {
     };
   }
 
-  // ---- HAR 記録 ----
-
-  harStart(): { recording: boolean } {
-    if (this.har) throw new Error('HAR は既に記録中です。kb net har stop で保存してから開始してください。');
-    this.har = { startedAt: new Date().toISOString(), entries: [] };
-    return { recording: true };
-  }
-
-  harStop(): unknown {
-    if (!this.har) throw new Error('HAR は記録中ではありません。kb net har start で開始してください。');
-    const har = {
-      log: {
-        version: '1.2',
-        creator: { name: 'kb-browser', version: '0.1.0' },
-        pages: [],
-        entries: this.har.entries,
-      },
-    };
-    this.har = null;
-    return har;
-  }
-
-  harStatus(): { recording: boolean; entries: number } {
-    return { recording: this.har != null, entries: this.har?.entries.length ?? 0 };
-  }
-
-  private async captureHarEntry(res: Response): Promise<void> {
-    try {
-      const req = res.request();
-      const timing = req.timing();
-      const contentType = res.headers()['content-type'] ?? '';
-      let text: string | undefined;
-      if (/text|json|javascript|xml|html|css|svg/.test(contentType)) {
-        const body = await res.body();
-        if (body.length <= HAR_BODY_CAP) text = body.toString('utf8');
-      }
-      const toNv = (h: Record<string, string>) => Object.entries(h).map(([name, value]) => ({ name, value }));
-      this.har?.entries.push({
-        startedDateTime: new Date().toISOString(),
-        time: Math.max(timing.responseEnd, 0),
-        request: {
-          method: req.method(),
-          url: req.url(),
-          httpVersion: 'HTTP/1.1',
-          headers: toNv(req.headers()),
-          queryString: [],
-          cookies: [],
-          headersSize: -1,
-          bodySize: -1,
-          ...(req.postData() != null
-            ? { postData: { mimeType: req.headers()['content-type'] ?? '', text: req.postData() } }
-            : {}),
-        },
-        response: {
-          status: res.status(),
-          statusText: res.statusText(),
-          httpVersion: 'HTTP/1.1',
-          headers: toNv(res.headers()),
-          cookies: [],
-          redirectURL: res.headers()['location'] ?? '',
-          content: { size: text?.length ?? -1, mimeType: contentType, ...(text != null ? { text } : {}) },
-          headersSize: -1,
-          bodySize: -1,
-        },
-        cache: {},
-        timings: {
-          send: 0,
-          wait: Math.max(timing.responseStart, 0),
-          receive: Math.max(timing.responseEnd - timing.responseStart, 0),
-        },
-      });
-    } catch {
-      /* ナビゲーション後は body が取れないことがある */
-    }
-  }
-
   // ---- コンソール (DevTools Console 相当) ----
 
   consoleQuery(opts: { tab?: number; since?: number; limit?: number }): {
@@ -1241,16 +810,7 @@ export class BrowserHost {
     return { url: page.url(), matched: conds.map((c) => c.name) };
   }
 
-  // ---- エミュレーション (DevTools Device Toolbar 相当) ----
-
-  private async cdpFor(tabId?: number): Promise<CDPSession> {
-    const { id, page } = this.getPage(tabId);
-    const existing = this.cdpSessions.get(id);
-    if (existing) return existing;
-    const session = await this.context.newCDPSession(page);
-    this.cdpSessions.set(id, session);
-    return session;
-  }
+  // ---- エミュレーション (Emulator へ委譲) ----
 
   async emulate(
     opts: {
@@ -1261,54 +821,14 @@ export class BrowserHost {
     },
     tabId?: number,
   ): Promise<{ applied: string[] }> {
-    const cdp = await this.cdpFor(tabId);
-    const applied: string[] = [];
-    if (opts.reset) {
-      await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => {});
-      await cdp.send('Emulation.clearGeolocationOverride').catch(() => {});
-      await cdp.send('Emulation.setTimezoneOverride', { timezoneId: '' }).catch(() => {});
-      await cdp.send('Emulation.setUserAgentOverride', { userAgent: '' }).catch(() => {});
-      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false }).catch(() => {});
-      applied.push('reset');
-    }
-    if (opts.ua) {
-      // Sec-CH-UA (Client Hints) と矛盾しないよう UA 文字列からメタデータも導出する
-      await cdp.send('Emulation.setUserAgentOverride', {
-        userAgent: opts.ua,
-        userAgentMetadata: uaMetadataFrom(opts.ua),
-      });
-      applied.push('ua');
-    }
-    if (opts.viewport) {
-      await cdp.send('Emulation.setDeviceMetricsOverride', {
-        width: opts.viewport.width,
-        height: opts.viewport.height,
-        deviceScaleFactor: opts.viewport.dpr ?? 1,
-        mobile: !!opts.viewport.mobile,
-      });
-      await cdp.send('Emulation.setTouchEmulationEnabled', {
-        enabled: !!opts.viewport.mobile,
-        maxTouchPoints: opts.viewport.mobile ? 5 : 1,
-      });
-      applied.push('viewport');
-    }
-    if (opts.timezone) {
-      await cdp.send('Emulation.setTimezoneOverride', { timezoneId: opts.timezone });
-      applied.push('timezone');
-    }
-    return { applied };
+    const { id, page } = this.getPage(tabId);
+    return this.emulator.apply(this.context, id, page, opts);
   }
 
   /** ネットワーク速度エミュレーション (offline | slow3g | fast3g | reset)。タブ単位。 */
   async emulateNetwork(preset: string, tabId?: number): Promise<{ preset: string }> {
-    const conditions = NETWORK_PRESETS[preset];
-    if (!conditions) {
-      throw new Error(`不明なプリセット "${preset}"。offline | slow3g | fast3g | reset から選んでください。`);
-    }
-    const cdp = await this.cdpFor(tabId);
-    await cdp.send('Network.enable');
-    await cdp.send('Network.emulateNetworkConditions', conditions);
-    return { preset };
+    const { id, page } = this.getPage(tabId);
+    return this.emulator.applyNetworkPreset(this.context, id, page, preset);
   }
 
   /** 位置情報のモック。context 全体(全タブ)に効く。 */
@@ -1370,41 +890,7 @@ export class BrowserHost {
       downloads: this.downloads.length,
       httpAuth: this.opts?.httpCredentials != null,
       ...(this.attached ? { attached: this.opts?.cdpUrl } : {}),
+      ...(this.opts?.stealth ? { stealth: true } : {}),
     };
   }
-}
-
-/** UA 文字列から Client Hints 用メタデータをおおまかに導出する。 */
-function uaMetadataFrom(ua: string):
-  | {
-      brands: { brand: string; version: string }[];
-      fullVersion: string;
-      platform: string;
-      platformVersion: string;
-      architecture: string;
-      model: string;
-      mobile: boolean;
-    }
-  | undefined {
-  const chromeVer = /Chrom(?:e|ium)\/(\d+)/.exec(ua)?.[1];
-  if (!chromeVer) return undefined;
-  const mobile = /Android|iPhone|Mobile/i.test(ua);
-  let platform = 'Windows';
-  if (/Android/i.test(ua)) platform = 'Android';
-  else if (/iPhone|iPad/.test(ua)) platform = 'iOS';
-  else if (/Mac OS X/.test(ua)) platform = 'macOS';
-  else if (/Linux/.test(ua)) platform = 'Linux';
-  return {
-    brands: [
-      { brand: 'Chromium', version: chromeVer },
-      { brand: 'Google Chrome', version: chromeVer },
-      { brand: 'Not-A.Brand', version: '99' },
-    ],
-    fullVersion: `${chromeVer}.0.0.0`,
-    platform,
-    platformVersion: '',
-    architecture: mobile ? '' : 'x86',
-    model: '',
-    mobile,
-  };
 }

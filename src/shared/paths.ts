@@ -41,12 +41,26 @@ export interface LastRunOptions {
   channel?: 'chrome' | 'msedge' | 'chromium';
   /** context 全体の User-Agent 上書き。 */
   userAgent?: string;
+  /** ステルスモード(navigator.webdriver 消し + 最小 init script)。 */
+  stealth?: boolean;
 }
 
 export function ensureKbHome(): void {
   fs.mkdirSync(KB_HOME, { recursive: true });
   fs.mkdirSync(PROFILES_DIR, { recursive: true });
   fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+}
+
+/**
+ * ディスク上の dist/daemon/main.js の mtime(ms)。デーモンの再ビルド検知
+ * (daemon.json の buildId との照合)に使う。読めなければ null。
+ */
+export function readDiskBuildId(): number | null {
+  try {
+    return Math.floor(fs.statSync(path.join(__dirname, '..', 'daemon', 'main.js')).mtimeMs);
+  } catch {
+    return null;
+  }
 }
 
 export function readDaemonInfo(): DaemonInfo | null {
@@ -83,7 +97,7 @@ export function removeDaemonInfoIfOwned(pid: number): void {
 export function readLastRun(): LastRunOptions | null {
   try {
     const raw = JSON.parse(fs.readFileSync(LAST_RUN_PATH, 'utf8')) as LastRunOptions;
-    return { headless: !!raw.headless, profile: raw.profile || 'default', channel: raw.channel, userAgent: raw.userAgent };
+    return { headless: !!raw.headless, profile: raw.profile || 'default', channel: raw.channel, userAgent: raw.userAgent, stealth: !!raw.stealth };
   } catch {
     return null;
   }

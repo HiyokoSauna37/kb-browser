@@ -4,6 +4,7 @@ import tls from 'node:tls';
 import { once } from 'node:events';
 import { SocksClient } from 'socks';
 import { DIRECT, type ProxyProfile } from '../shared/proxyStore';
+import { escapeRegExp } from '../shared/util';
 
 /** 上流(プロキシ/接続先)への接続タイムアウト。死んだプロキシでブラウザが固まるのを防ぐ。 */
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -309,12 +310,8 @@ export function splitHostPort(input: string, defaultPort: number): { host: strin
 export function matchHost(pattern: string, host: string): boolean {
   if (pattern === '*') return true;
   if (pattern.startsWith('*.') && host === pattern.slice(2)) return true;
-  const regex = new RegExp('^' + pattern.split('*').map(escapeRegex).join('.*') + '$', 'i');
+  const regex = new RegExp('^' + pattern.split('*').map(escapeRegExp).join('.*') + '$', 'i');
   return regex.test(host);
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /** CONNECT のレスポンスヘッダを読み、200 を確認する。ヘッダ後の余剰データは socket に戻す。 */

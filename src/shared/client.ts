@@ -7,6 +7,7 @@ import {
   SPAWN_LOCK_PATH,
   ensureKbHome,
   readDaemonInfo,
+  readDiskBuildId,
   readLastRun,
   removeDaemonInfo,
   type DaemonInfo,
@@ -41,14 +42,10 @@ let warnedStaleBuild = false;
 /** デーモンが再ビルド前の古い dist で動いている場合に一度だけ警告する。 */
 function warnIfStaleBuild(info: DaemonInfo): void {
   if (warnedStaleBuild || !info.buildId) return;
-  try {
-    const current = Math.floor(fs.statSync(path.join(__dirname, '..', 'daemon', 'main.js')).mtimeMs);
-    if (current !== info.buildId) {
-      warnedStaleBuild = true;
-      console.error('警告: デーモンは再ビルド前の古いコードで動作しています。`kb daemon stop` 後に再実行すると反映されます。');
-    }
-  } catch {
-    /* 警告用の補助チェックにすぎない */
+  const current = readDiskBuildId();
+  if (current != null && current !== info.buildId) {
+    warnedStaleBuild = true;
+    console.error('警告: デーモンは再ビルド前の古いコードで動作しています。`kb daemon stop` 後に再実行すると反映されます。');
   }
 }
 
@@ -117,7 +114,7 @@ export function releaseSpawnLock(): void {
  * 別プロセスが spawn 中ならスキップして待つだけにする。
  */
 export function spawnDaemon(
-  opts: { headless?: boolean; profile?: string; channel?: string; userAgent?: string; cdpUrl?: string } = {},
+  opts: { headless?: boolean; profile?: string; channel?: string; userAgent?: string; cdpUrl?: string; stealth?: boolean } = {},
 ): ChildProcess | null {
   const last = readLastRun();
   const merged = {
@@ -126,6 +123,8 @@ export function spawnDaemon(
     // "auto" / 空文字は「明示的に既定へ戻す」= last-run を継承しない
     channel: opts.channel === 'auto' ? undefined : (opts.channel ?? last?.channel),
     userAgent: opts.userAgent === '' ? undefined : (opts.userAgent ?? last?.userAgent),
+    // 明示 start は concrete な boolean を渡す(継承しない)。自動 spawn は undefined → last-run 継承。
+    stealth: opts.stealth ?? last?.stealth ?? false,
   };
   if (!acquireSpawnLock()) return null;
   const daemonJs = path.join(__dirname, '..', 'daemon', 'main.js');
@@ -134,6 +133,7 @@ export function spawnDaemon(
   args.push('--profile', merged.profile);
   if (merged.channel) args.push('--channel', merged.channel);
   if (merged.userAgent) args.push('--ua', merged.userAgent);
+  if (merged.stealth) args.push('--stealth');
   // アタッチは明示起動 (kb daemon start --cdp) のみ。last-run からは継承しない
   if (opts.cdpUrl) args.push('--cdp', opts.cdpUrl);
   const child = spawn(process.execPath, args, {
@@ -195,7 +195,7 @@ export async function rpc(cmd: string, args: Record<string, unknown> = {}): Prom
       const status = await rpcRaw(info, 'daemon.status').catch(() => null);
       if (status) {
         console.error(
-          `kb: デーモンを自動起動しました (headless=${status.headless}, profile=${status.profile}, channel=${status.channel})`,
+          `kb: デーモンを自動起動しました (headless=${status.headless}, profile=${status.profile}, channel=${status.channel}${status.stealth ? ', stealth' : ''})`,
         );
       }
     } finally {
