@@ -373,7 +373,7 @@ async function main(): Promise<void> {
     headless: host.headless,
     channel: host.channel,
     ...(cdpUrl ? { attach: cdpUrl } : {}),
-    kbVersion: '0.6.1',
+    kbVersion: '0.6.2',
   });
 
   // 生ジャーナルには機微な値が平文で残るため、古いセッションは自動削除する(既定: 直近 20)

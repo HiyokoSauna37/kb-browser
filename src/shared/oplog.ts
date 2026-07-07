@@ -62,7 +62,8 @@ export interface SessionMeta {
 
 // ---- マスキング ----
 
-export const MASK = '«masked»';
+// percent-encode されても読める ASCII マーカー(入れ子 URL 内で «masked» が %25C2%25AB… に化ける問題への対処)
+export const MASK = '[MASKED]';
 
 export interface MaskOptions {
   /** 既定 true。false(--no-mask)でも deny 指定は常に適用される。 */
@@ -123,6 +124,17 @@ export function maskUrlsInText(text: string, o: MaskOptions): string {
   return text.replace(/https?:\/\/[^\s"'<>\\)\]}]+/g, (m) => maskUrl(m, o));
 }
 
+/** パス+クエリ形式(HTTP/2 の :path 擬似ヘッダ等)のクエリ値をマスクする。 */
+export function maskPath(value: string, o: MaskOptions): string {
+  if (!o.mask && !o.deny) return value;
+  if (/^https?:\/\//i.test(value)) return maskUrl(value, o);
+  if (!value.startsWith('/')) return value;
+  // ダミーのオリジンを付けて URL としてマスクし、オリジンを剥がして返す
+  const BASE = 'http://kb-mask-base';
+  const masked = maskUrl(BASE + value, o);
+  return masked.startsWith(BASE) ? masked.slice(BASE.length) : value;
+}
+
 /** ヘッダのマスク: 既定は機微なヘッダのみ。deny は全ヘッダの名前・値に適用。URL を運ぶヘッダはクエリ値もマスク。 */
 function redactHeaders(headers: Record<string, string>, o: MaskOptions): Record<string, string> {
   const out: Record<string, string> = {};
@@ -130,6 +142,7 @@ function redactHeaders(headers: Record<string, string>, o: MaskOptions): Record<
     if (SENSITIVE_HEADER_RE.test(name)) out[name] = maskValue(name, value, o);
     else if (o.deny && (o.deny.test(name) || o.deny.test(value))) out[name] = MASK;
     else if (/^(location|referer|refresh)$/i.test(name)) out[name] = maskUrlsInText(value, o);
+    else if (name === ':path') out[name] = maskPath(value, o); // HTTP/2 擬似ヘッダはパス+クエリを運ぶ
     else out[name] = value;
   }
   return out;

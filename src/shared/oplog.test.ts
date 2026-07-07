@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   MASK,
   maskBody,
+  maskPath,
   maskUrl,
   maskUrlsInText,
   redactEvent,
@@ -124,8 +125,22 @@ test('maskUrl: --no-mask では deny 指定分だけマスク', () => {
 test('maskUrlsInText: 本文・ヘッダ内の URL のクエリ値もマスクされる', () => {
   const text = 'redirect to https://app.example.com/cb?code=abc&session_token=xyz please';
   const masked = maskUrlsInText(text, M);
-  assert.match(masked, /session_token=%C2%ABmasked%C2%BB|session_token=«masked»/);
+  assert.doesNotMatch(masked, /xyz/);
+  assert.match(masked, /session_token=%5BMASKED%5D/); // percent-encode されても ASCII で読める
   assert.match(masked, /code=abc/);
+});
+
+test('maskPath: :path 擬似ヘッダ(パス+クエリ)のクエリ値がマスクされる', () => {
+  assert.equal(maskPath('/html?token=tok1&page=3', M), `/html?token=${encodeURIComponent(MASK)}&page=3`);
+  assert.equal(maskPath('/plain/path', M), '/plain/path'); // クエリなしは無変更
+  assert.equal(maskPath('OPTIONS-star-form', M), 'OPTIONS-star-form'); // パス形式でないものは触らない
+});
+
+test('redactEvent: リクエストヘッダの :path のクエリ値もマスクされる', () => {
+  const e = netEvent({ requestHeaders: { ':path': '/html?token=tok1&page=3', accept: '*/*' } });
+  const r = redactEvent(e, M) as NetEvent;
+  assert.doesNotMatch(r.requestHeaders![':path'], /tok1/);
+  assert.match(r.requestHeaders![':path'], /page=3/);
 });
 
 test('redactEvent: net.url と open の args.url のクエリ値がマスクされる', () => {

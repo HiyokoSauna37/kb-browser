@@ -82,7 +82,7 @@ function fmtTabs(list: any[]): string {
 program
   .name('kb')
   .description('CLI-operable browser (Playwright + Chromium)')
-  .version('0.6.1')
+  .version('0.6.2')
   .option('--json', 'JSON 形式で出力する')
   .hook('preAction', (cmd) => {
     jsonOutput = !!cmd.optsWithGlobals().json;
@@ -157,9 +157,29 @@ daemon
         return;
       }
       const status = await rpcRaw(info, 'daemon.status');
-      print({ running: true, ...status }, (s) =>
-        `running (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}, tabs=${s.tabs}, proxy=${s.proxy}${s.attached ? `, attach=${s.attached}` : ''})`,
-      );
+      // 「旧コードで動作」警告が本物の mismatch か確認できるよう、実行中/ディスク上のビルドを併記する
+      let build: { running?: string; disk?: string; match?: boolean } = {};
+      try {
+        const disk = Math.floor(fs.statSync(path.join(__dirname, 'daemon', 'main.js')).mtimeMs);
+        if (info.buildId) {
+          build = {
+            running: new Date(info.buildId).toISOString(),
+            disk: new Date(disk).toISOString(),
+            match: disk === info.buildId,
+          };
+        }
+      } catch {
+        /* ビルド情報は補助表示にすぎない */
+      }
+      print({ running: true, ...status, build }, (s) => {
+        const buildNote =
+          build.match === undefined
+            ? ''
+            : build.match
+              ? ', build=ok'
+              : `, build=MISMATCH (running=${build.running} / disk=${build.disk} — kb daemon stop で新コードが反映されます)`;
+        return `running (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}, tabs=${s.tabs}, proxy=${s.proxy}${s.attached ? `, attach=${s.attached}` : ''}${buildNote})`;
+      });
     }),
   );
 

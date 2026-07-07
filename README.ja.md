@@ -161,7 +161,7 @@ kb-log-<session>/
 └─ meta.json      # セッション情報
 ```
 
-**機微な値は既定でマスク**されます(`«masked»`): 入力値(fill)、eval の戻り値、Authorization / Cookie 等のヘッダ、ボディ内の password / token 系キー、**URL クエリの機微キー**(`?api_key=…` 等。Location / Referer ヘッダや本文中の URL も対象)。解除は明示 `--no-mask`、微調整は `--allow` / `--deny`(正規表現)。**手元の生ジャーナル(`~/.kb/logs/`)は無改変**で、マスクは export / show 時にだけ適用されます — レポートはいつでも再生成できます。
+**機微な値は既定でマスク**されます(`[MASKED]`): 入力値(fill)、eval の戻り値、Authorization / Cookie 等のヘッダ、ボディ内の password / token 系キー、**URL クエリの機微キー**(`?api_key=…` 等。Location / Referer ヘッダや本文中の URL も対象)。解除は明示 `--no-mask`、微調整は `--allow` / `--deny`(正規表現)。**手元の生ジャーナル(`~/.kb/logs/`)は無改変**で、マスクは export / show 時にだけ適用されます — レポートはいつでも再生成できます。
 
 注意: `eval` の式や `net mock --text` の引数は「あなたが書いたコード」として逐語記録されます(マスクは値に対して働く)。引数に機微な値を直書きした場合は `--deny <regex>` で潰してから共有してください。また**生ジャーナルには機微な値が平文で残る**ため、共有には必ず export を使ってください。古いセッションはデーモン起動時に自動削除されます(既定: 直近 20。`KB_LOG_KEEP` で変更)。
 
