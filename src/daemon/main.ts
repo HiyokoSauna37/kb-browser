@@ -63,12 +63,13 @@ async function main(): Promise<void> {
     'net.log', 'net.body', 'net.headers', 'net.rules', 'net.har.status',
     'console.log', 'proxy.status', 'proxy.test',
     'log.start', 'log.stop', 'log.status',
+    'dialog.info',
   ]);
 
   /** 自動スクリーンショット(kb log start --shots)の対象になる操作コマンド。 */
   const AUTO_SHOT_CMDS = new Set([
     'open', 'click', 'fill', 'press', 'hover', 'check', 'select', 'upload', 'scroll',
-    'back', 'forward', 'reload',
+    'back', 'forward', 'reload', 'dialog.respond',
   ]);
 
   /** RPC 1 回分をジャーナルへ記録する。 */
@@ -289,6 +290,12 @@ async function main(): Promise<void> {
         return host.consoleClear();
       case 'dom.query':
         return host.domQuery(args.selector, args, args.tab);
+      case 'dialog.info':
+        return host.dialogInfo(args.tab);
+      case 'dialog.respond':
+        return host.dialogRespond(!!args.accept, args.text, args.tab);
+      case 'dialog.policy':
+        return host.setDialogPolicy(args.policy);
       case 'mode.set': {
         const result = await host.setMode(!!args.headless);
         writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth });

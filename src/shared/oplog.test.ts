@@ -197,6 +197,18 @@ test('toCurlCommand: Content-Type 未記録の JSON ボディは application/jso
   assert.doesNotMatch(withCt, /application\/json/);
 });
 
+test('toCliString: dialog.respond は accept/dismiss/text/tab を再現する', () => {
+  assert.equal(toCliString(cmdEvent('dialog.respond', { accept: true })), 'kb dialog accept');
+  assert.equal(toCliString(cmdEvent('dialog.respond', { accept: true, text: 'Alice' })), 'kb dialog accept Alice');
+  assert.equal(toCliString(cmdEvent('dialog.respond', { accept: false, tab: 2 })), 'kb dialog dismiss -t 2');
+});
+
+test('redactEvent: dialog.respond の prompt 入力値は fill と同様にマスクされる', () => {
+  const e = cmdEvent('dialog.respond', { accept: true, text: 'hunter2' });
+  assert.equal((redactEvent(e, M) as CommandEvent).args.text, MASK);
+  assert.equal((redactEvent(e, NO_M) as CommandEvent).args.text, 'hunter2');
+});
+
 test('toCliString: select は --label が値の前に出る', () => {
   assert.equal(
     toCliString(cmdEvent('select', { selector: '#dropdown', values: ['Option 2'], byLabel: true })),

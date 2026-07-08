@@ -10,7 +10,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3ddc97.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A518-3ddc97.svg" alt="Node >= 18">
   <img src="https://img.shields.io/badge/Playwright-Chromium-2a3244.svg" alt="Playwright + Chromium">
-  <img src="https://img.shields.io/badge/MCP-23%20tools-2a3244.svg" alt="MCP · 23 tools">
+  <img src="https://img.shields.io/badge/MCP-24%20tools-2a3244.svg" alt="MCP · 24 tools">
 </p>
 
 日本語版は [README.ja.md](README.ja.md) を参照してください。
@@ -18,7 +18,7 @@
 Everything a GUI browser gives you — page rendering, cookie management, DevTools operations (Network / Console / Elements) — is available as `kb` commands. FoxyProxy-style proxy profiles are built in, with **restart-free switching** and per-host routing rules. Designed to be driven by AI agents (Claude Code, etc.) via Bash or MCP, while the window is a real Chrome you can use by hand at any time.
 
 > **Two workflows it's built for:**
-> - **Drive it from an AI agent** — Claude Code and other agents operate kb over **MCP (23 tools)** or **Bash** (every command supports `--json`). The accessibility-snapshot + `--ref` loop is tuned for reliable, low-token automation, and the resident daemon returns each step in tens of milliseconds.
+> - **Drive it from an AI agent** — Claude Code and other agents operate kb over **MCP (24 tools)** or **Bash** (every command supports `--json`). The accessibility-snapshot + `--ref` loop is tuned for reliable, low-token automation, and the resident daemon returns each step in tens of milliseconds.
 > - **Security research & bug-bounty recon** (authorized testing only) — session-shared HTTP, live network inspection/mocking, raw `eval` on authenticated SPAs, proxy chaining into Burp/Caido, two-account IDOR via profiles, and masked, shareable evidence bundles. See [Security research & bug-bounty recon](#security-research--bug-bounty-recon).
 
 ## Features
@@ -34,7 +34,7 @@ Everything a GUI browser gives you — page rendering, cookie management, DevToo
 - **Persistent sign-in** — log in once and the state is kept in the profile across sessions; `kb login` wraps the manual sign-in flow in one command, `kb storage dump / restore` exports it to a file
 - **Operation recording** — commands, network, and console are journaled by default; `kb log export` produces a self-contained bundle (report + reproduction steps + standalone curl + screenshots) with sensitive values masked by default
 - **Human-in-the-loop** — the agent automates, you take over for logins/CAPTCHAs, `kb wait` detects when you're done
-- **MCP server** — `kb-mcp` exposes 23 tools (screenshots are returned as images)
+- **MCP server** — `kb-mcp` exposes 24 tools (screenshots are returned as images)
 - **`--json` everywhere** — machine-readable output for scripting and agents
 
 ## Install
@@ -68,6 +68,7 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 | Pages | `kb open <url> [-n] [--wait idle]` / `kb tabs [close/switch <id>]` / `kb text` / `kb html` / `kb snapshot` / `kb screenshot [<sel>\|--ref e12] [-f] [--timeout <sec>]` (element-level supported) / `kb pdf` (headless only) |
 | Navigation | `kb back` / `kb forward` / `kb reload` / `kb scroll [--to <sel>/--bottom]` |
 | Interaction | `kb click` / `kb fill` / `kb select [--label]` / `kb check` / `kb uncheck` / `kb hover` / `kb upload <sel> <local file path...>` / `kb press <key>` / `kb eval <js> [--file f.js]` (`await` & multi-line OK; returns the last expression) — target via CSS selector, `--ref e12` (from snapshot), or `--frame <sel>` (inside iframe) |
+| Dialogs | `kb dialog [show]` / `kb dialog accept [text]` / `kb dialog dismiss` / `kb dialog policy [hold\|accept\|dismiss]` (hold `alert`/`confirm`/`prompt`, then respond; default `hold`) |
 | HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file]` (page-independent; shares cookies & proxy with the browser) |
 | Login | `kb login [url] [--until <glob>] [--save <file>]` (manual sign-in → state auto-saved to the profile) |
 | Cookies / session | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump/restore` |
@@ -83,6 +84,33 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 | Emulation | `kb emulate ua/viewport/tz/geo/net/reset` (net: offline/slow3g/fast3g) |
 
 All commands support `--json`. Long outputs are truncated at 20,000 chars by default; use `--offset <n>` for the next chunk or `--max-chars 0` for everything.
+
+## JS dialogs (alert / confirm / prompt)
+
+Pages that open `confirm` / `alert` / `prompt` on click work too. kb **holds** the dialog open and waits for a response (default `hold`), so the action result carries a `dialog`:
+
+```bash
+kb click "#delete"
+# → clicked → confirm dialog "Are you sure?" is awaiting a response (tab 1).
+#    Respond with kb dialog accept / kb dialog dismiss
+
+kb dialog                 # inspect the pending dialog
+kb dialog accept          # OK (confirm → true, prompt → default value)
+kb dialog accept "Alice"  # answer a prompt with text, then OK
+kb dialog dismiss         # Cancel
+```
+
+While a dialog is pending, other actions on that tab (`snapshot` / `text` / `click` …) are guarded and prompt you to respond first. In headed mode the native dialog is shown on screen, so you can click OK / Cancel in the window directly — kb clears its pending state automatically.
+
+To auto-respond instead of holding:
+
+```bash
+kb dialog policy accept    # auto-OK every dialog (no display)
+kb dialog policy dismiss   # auto-cancel every dialog (the old behavior)
+kb dialog policy hold      # back to the default (hold and wait)
+```
+
+> Previously Playwright's default dismissed dialogs immediately, making buttons that trigger a `confirm` look like they "did nothing". `hold` fixes this — the dialog is shown to a human and you choose the response.
 
 ## Staying signed in
 
@@ -230,7 +258,7 @@ When a connection fails (the browser shows `ERR_TUNNEL_CONNECTION_FAILED`), `kb 
 claude mcp add kb -- kb-mcp
 ```
 
-Exposes `kb_snapshot`, `kb_open`, `kb_text`, `kb_screenshot` (returns an image), `kb_click`, `kb_fill`, `kb_select`, `kb_eval`, `kb_request`, `kb_net_log`, `kb_net_body`, `kb_net_headers`, `kb_proxy_use`, and more — 23 tools.
+Exposes `kb_snapshot`, `kb_open`, `kb_text`, `kb_screenshot` (returns an image), `kb_click`, `kb_fill`, `kb_select`, `kb_eval`, `kb_dialog` (respond to alert/confirm/prompt), `kb_request`, `kb_net_log`, `kb_net_body`, `kb_net_headers`, `kb_proxy_use`, and more — 24 tools.
 
 **Via Bash** everything is available too (every command supports `--json`, with symmetric `{ok:true,result}` / `{ok:false,error}`). The recommended loop:
 

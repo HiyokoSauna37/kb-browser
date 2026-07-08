@@ -81,7 +81,26 @@ export interface ActionResult {
   title: string;
   /** 失効した ref を role/name の一致で新しい ref に自動再解決して操作した場合に入る。 */
   reResolvedRef?: { from: string; to: string };
+  /** 操作で JS ダイアログが開いて応答待ちになった場合に入る。kb dialog accept / dismiss で応答する。 */
+  dialog?: DialogInfo;
 }
+
+/** 応答待ち(または応答済み)の JS ダイアログ (alert / confirm / prompt / beforeunload)。 */
+export interface DialogInfo {
+  tab: number;
+  type: string;
+  message: string;
+  /** prompt のデフォルト入力値。 */
+  defaultValue?: string;
+  ts: string;
+}
+
+/**
+ * JS ダイアログへの応答ポリシー。
+ * - hold: 保留して応答を待つ(headed ならネイティブダイアログが表示され、ウィンドウ上でも応答できる)
+ * - accept / dismiss: 表示せず即座に自動応答する(dismiss が従来の Playwright 既定挙動)
+ */
+export type DialogPolicy = 'hold' | 'accept' | 'dismiss';
 
 /** リングバッファ(net / console ログ)の上限。超えた分は古いものから捨てる。 */
 export const LOG_CAP = 3000;

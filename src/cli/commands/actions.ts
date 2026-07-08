@@ -171,6 +171,60 @@ export function registerActionCommands(program: Command): void {
       }),
     );
 
+  const fmtDialog = (d: any) =>
+    `[tab ${d.tab}] ${d.type}「${d.message}」${d.defaultValue !== undefined ? ` (default: "${d.defaultValue}")` : ''}`;
+
+  const dialog = program
+    .command('dialog')
+    .description('JS ダイアログ (alert/confirm/prompt) の確認と応答。既定 hold: 応答があるまで表示されたまま保留する');
+
+  dialog
+    .command('show', { isDefault: true })
+    .description('応答待ちのダイアログと現在のポリシーを表示する')
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .action(
+      run(async (opts: { tab?: number }) => {
+        const r = await rpc('dialog.info', { tab: opts.tab });
+        print(r, (r) => {
+          if (r.pending) return `応答待ち: ${fmtDialog(r.pending)}\nkb dialog accept / kb dialog dismiss で応答 (policy: ${r.policy})`;
+          const others = r.pendingTabs.length ? `\n(他タブに保留あり: ${r.pendingTabs.map((t: number) => `-t ${t}`).join(', ')})` : '';
+          return `応答待ちのダイアログはありません (policy: ${r.policy})${others}`;
+        });
+      }),
+    );
+
+  dialog
+    .command('accept [text]')
+    .description('ダイアログを承認する (OK)。prompt は text を入力値にできる')
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .action(
+      run(async (text: string | undefined, opts: { tab?: number }) => {
+        const r = await rpc('dialog.respond', { accept: true, text, tab: opts.tab });
+        print(r, (r) => `accepted: ${fmtDialog(r.dialog)}`);
+      }),
+    );
+
+  dialog
+    .command('dismiss')
+    .description('ダイアログをキャンセルする')
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .action(
+      run(async (opts: { tab?: number }) => {
+        const r = await rpc('dialog.respond', { accept: false, tab: opts.tab });
+        print(r, (r) => `dismissed: ${fmtDialog(r.dialog)}`);
+      }),
+    );
+
+  dialog
+    .command('policy [policy]')
+    .description('応答ポリシーを表示/設定する (hold = 保留して応答を待つ / accept / dismiss = 自動応答)')
+    .action(
+      run(async (policy: string | undefined) => {
+        const r = await rpc('dialog.policy', { policy });
+        print(r, (r) => `policy: ${r.policy}`);
+      }),
+    );
+
   program
     .command('pdf')
     .description('ページを PDF に出力する(headless モードのみ)')

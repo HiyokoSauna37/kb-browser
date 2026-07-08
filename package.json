@@ -1,6 +1,6 @@
 {
   "name": "kb-browser",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "CLI-operable browser built on Playwright + Chromium (CDP)",
   "license": "MIT",
   "bin": {

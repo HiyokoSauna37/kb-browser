@@ -188,6 +188,20 @@ tool(
 );
 
 tool(
+  'kb_dialog',
+  'JS ダイアログ (alert/confirm/prompt) の確認と応答。kb_click 等の結果に dialog が含まれていたら応答待ちなので、accept / dismiss で応答する(応答するまでそのタブの操作はブロックされる)。action 省略時は保留中ダイアログの情報を返す。',
+  {
+    action: z.enum(['info', 'accept', 'dismiss']).optional().describe('省略時は info(保留中ダイアログの表示)'),
+    text: z.string().optional().describe('prompt に入力する値(accept 時のみ)'),
+    tab,
+  },
+  safe(async ({ action, text: promptText, tab }) => {
+    if (!action || action === 'info') return text(await rpc('dialog.info', { tab }));
+    return text(await rpc('dialog.respond', { accept: action === 'accept', text: promptText, tab }));
+  }),
+);
+
+tool(
   'kb_cookies_list',
   'Cookie 一覧を取得する。',
   { domain: z.string().optional().describe('ドメインで絞り込む') },

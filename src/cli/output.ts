@@ -40,6 +40,10 @@ export const intOpt = (v: string) => parseInt(v, 10);
 /** click / fill 等の操作結果(移動後の URL / タイトル)を短く表示する。 */
 export function fmtAction(verb: string): (r: any) => string {
   return (r) => {
+    if (r.dialog) {
+      const d = r.dialog;
+      return `${verb} → ${d.type} ダイアログ「${d.message}」が応答待ちです (tab ${d.tab})。kb dialog accept / kb dialog dismiss で応答してください(headed ならウィンドウ上でも応答できます)`;
+    }
     const heal = r.reResolvedRef ? `\n(ref ${r.reResolvedRef.from} は失効していたため ${r.reResolvedRef.to} に自動再解決して操作しました)` : '';
     return `${verb} → ${r.url}${r.title ? ` "${r.title}"` : ''}${heal}`;
   };

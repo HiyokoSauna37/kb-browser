@@ -91,6 +91,7 @@ const REPLAY_CMDS = new Set([
   'open', 'click', 'fill', 'press', 'hover', 'check', 'select', 'upload', 'scroll',
   'back', 'forward', 'reload', 'eval', 'request', 'wait', 'screenshot',
   'net.block', 'net.mock', 'net.unroute', 'emulate', 'emulate.geo', 'emulate.net',
+  'dialog.respond',
 ]);
 
 /** kb log — 操作記録(ジャーナル)の管理・レポート生成・再実行。 */

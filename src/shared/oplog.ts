@@ -206,6 +206,10 @@ export function redactEvent(event: OpEvent, o: MaskOptions): OpEvent {
     case 'fill':
       if (typeof args.value === 'string') args.value = maskValue('fill.value', args.value, o);
       break;
+    case 'dialog.respond':
+      // prompt の入力値はパスワード等の可能性があるため fill と同じ扱いでマスクする
+      if (typeof args.text === 'string') args.text = maskValue('dialog.text', args.text, o);
+      break;
     case 'auth.set':
       if (args.credentials) {
         args.credentials = {
@@ -339,6 +343,10 @@ export function toCliString(e: CommandEvent): string {
       return 'kb forward';
     case 'reload':
       return 'kb reload';
+    case 'dialog.respond':
+      return a.accept ? `kb dialog accept${a.text != null ? ` ${q(a.text)}` : ''}${a.tab != null ? ` -t ${a.tab}` : ''}` : `kb dialog dismiss${a.tab != null ? ` -t ${a.tab}` : ''}`;
+    case 'dialog.policy':
+      return `kb dialog policy ${a.policy ?? ''}`.trim();
     case 'eval':
       return `kb eval ${q(a.expression)}`;
     case 'request': {
