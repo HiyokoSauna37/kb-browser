@@ -39,6 +39,18 @@ export async function rpcRaw(info: DaemonInfo, cmd: string, args: Record<string,
 
 let warnedStaleBuild = false;
 
+/** このプロセスが rpc() 経由でデーモンを自動起動したか(MCP の後片付け判定用)。 */
+let spawnedHere = false;
+
+/**
+ * このプロセスの生存中に(自動 spawn で)デーモンを起動したなら true。
+ * 既に走っていたデーモンに相乗りしただけなら false のまま(CLI 併用ユーザを壊さないため、
+ * MCP はこれが true のときだけシャットダウン時に daemon.stop する)。
+ */
+export function spawnedDaemonHere(): boolean {
+  return spawnedHere;
+}
+
 /** デーモンが再ビルド前の古い dist で動いている場合に一度だけ警告する。 */
 function warnIfStaleBuild(info: DaemonInfo): void {
   if (warnedStaleBuild || !info.buildId) return;
@@ -114,7 +126,16 @@ export function releaseSpawnLock(): void {
  * 別プロセスが spawn 中ならスキップして待つだけにする。
  */
 export function spawnDaemon(
-  opts: { headless?: boolean; profile?: string; channel?: string; userAgent?: string; cdpUrl?: string; stealth?: boolean } = {},
+  opts: {
+    headless?: boolean;
+    profile?: string;
+    channel?: string;
+    userAgent?: string;
+    cdpUrl?: string;
+    stealth?: boolean;
+    /** アイドル自動終了の閾値(秒)。0 で無効。未指定なら last-run を継承し、それも無ければデーモン側の既定。 */
+    idleTimeoutSec?: number;
+  } = {},
 ): ChildProcess | null {
   const last = readLastRun();
   const merged = {
@@ -125,6 +146,9 @@ export function spawnDaemon(
     userAgent: opts.userAgent === '' ? undefined : (opts.userAgent ?? last?.userAgent),
     // 明示 start は concrete な boolean を渡す(継承しない)。自動 spawn は undefined → last-run 継承。
     stealth: opts.stealth ?? last?.stealth ?? false,
+    // アイドル閾値は headless/profile と同様に自動 spawn が last-run を継承する。undefined の
+    // ときは引数を渡さず、デーモン側で KB_IDLE_TIMEOUT / 既定にフォールバックさせる。
+    idleTimeoutSec: opts.idleTimeoutSec ?? last?.idleTimeoutSec,
   };
   if (!acquireSpawnLock()) return null;
   const daemonJs = path.join(__dirname, '..', 'daemon', 'main.js');
@@ -134,6 +158,7 @@ export function spawnDaemon(
   if (merged.channel) args.push('--channel', merged.channel);
   if (merged.userAgent) args.push('--ua', merged.userAgent);
   if (merged.stealth) args.push('--stealth');
+  if (merged.idleTimeoutSec != null) args.push('--idle-timeout', String(merged.idleTimeoutSec));
   // アタッチは明示起動 (kb daemon start --cdp) のみ。last-run からは継承しない
   if (opts.cdpUrl) args.push('--cdp', opts.cdpUrl);
   const child = spawn(process.execPath, args, {
@@ -191,6 +216,9 @@ export async function rpc(cmd: string, args: Record<string, unknown> = {}): Prom
     try {
       const child = spawnDaemon();
       info = await waitForDaemon(child);
+      // child != null = 自分が spawn した(= 所有、MCP の後片付け対象)。null なら別プロセスの
+      // spawn に相乗りしただけなので所有しない。
+      if (child) spawnedHere = true;
       // 「アタッチしていたつもりが素のブラウザ」等に気付けるよう、何が起動したかを通知する
       const status = await rpcRaw(info, 'daemon.status').catch(() => null);
       if (status) {

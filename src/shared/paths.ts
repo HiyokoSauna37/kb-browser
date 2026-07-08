@@ -43,6 +43,8 @@ export interface LastRunOptions {
   userAgent?: string;
   /** ステルスモード(navigator.webdriver 消し + 最小 init script)。 */
   stealth?: boolean;
+  /** アイドル自動終了の閾値(秒)。0 は無効。自動 spawn が引き継ぐ。 */
+  idleTimeoutSec?: number;
 }
 
 export function ensureKbHome(): void {
@@ -97,7 +99,14 @@ export function removeDaemonInfoIfOwned(pid: number): void {
 export function readLastRun(): LastRunOptions | null {
   try {
     const raw = JSON.parse(fs.readFileSync(LAST_RUN_PATH, 'utf8')) as LastRunOptions;
-    return { headless: !!raw.headless, profile: raw.profile || 'default', channel: raw.channel, userAgent: raw.userAgent, stealth: !!raw.stealth };
+    return {
+      headless: !!raw.headless,
+      profile: raw.profile || 'default',
+      channel: raw.channel,
+      userAgent: raw.userAgent,
+      stealth: !!raw.stealth,
+      idleTimeoutSec: typeof raw.idleTimeoutSec === 'number' ? raw.idleTimeoutSec : undefined,
+    };
   } catch {
     return null;
   }

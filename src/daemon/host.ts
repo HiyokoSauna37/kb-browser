@@ -29,6 +29,8 @@ export type { ActionResult, ConsoleEntry, DialogInfo, DialogPolicy, DownloadInfo
 const DOM_HTML_CAP = 2_000;
 /** 操作系のデフォルトタイムアウト。 */
 const ACTION_TIMEOUT = 10_000;
+/** downloads 配列の保持上限(古いものから evict。ファイル実体は消さない)。 */
+const DOWNLOADS_CAP = 1_000;
 
 /**
  * Chromium(persistent context)を保持し、タブを ID で管理するブラウザホスト。
@@ -75,6 +77,13 @@ export class BrowserHost {
 
   /** ブラウザウィンドウが(手動含め)完全に閉じられたときに呼ばれる。 */
   onClosed: () => void = () => {};
+
+  /**
+   * 何らかのページ活動(ネットワークリクエスト / コンソール出力 / ページエラー)があるたびに
+   * 呼ばれる。アイドル自動終了(idle reaper)が「headed でユーザーが直接操作中」を検知して
+   * 延命するために使う(main.ts が設定)。
+   */
+  onActivity: () => void = () => {};
 
   /** 操作ジャーナル用フック(main.ts が設定)。xhr/fetch/document/other の通信を全ヘッダ付きで通知する。 */
   set onJournalNet(fn: NetMonitor['onJournalNet']) {
@@ -312,14 +321,19 @@ export class BrowserHost {
     void this.watchDialogClose(page, id);
 
     this.net.watchPage(page, id);
+    // ページのネットワーク活動を idle reaper へ通知する(headed でユーザーが直接操作 → ナビ →
+    // リクエスト発生で延命される)。ログ蓄積は net.watchPage 側が別途行う。
+    page.on('request', () => this.onActivity());
 
     page.on('console', (msg) => {
       this.consoleLog.push({ ts: new Date().toISOString(), tab: id, kind: msg.type(), text: msg.text() });
       this.onJournalConsole({ kind: msg.type(), text: msg.text(), tab: id });
+      this.onActivity();
     });
     page.on('pageerror', (err) => {
       this.consoleLog.push({ ts: new Date().toISOString(), tab: id, kind: 'pageerror', text: err.message });
       this.onJournalConsole({ kind: 'pageerror', text: err.message, tab: id });
+      this.onActivity();
     });
     page.on('download', (dl) => {
       const dlId = this.nextDownloadId++;
@@ -327,6 +341,8 @@ export class BrowserHost {
       const file = path.join(DOWNLOADS_DIR, `${dlId}-${safeName}`);
       const info: DownloadInfo = { id: dlId, ts: new Date().toISOString(), tab: id, url: dl.url(), file, state: 'saving' };
       this.downloads.push(info);
+      // 上限を超えたら古いエントリから捨てる(ダウンロード済みファイルの実体は残す)。
+      if (this.downloads.length > DOWNLOADS_CAP) this.downloads.splice(0, this.downloads.length - DOWNLOADS_CAP);
       dl.saveAs(file).then(
         () => {
           info.state = 'saved';

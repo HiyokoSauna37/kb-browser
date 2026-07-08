@@ -2,6 +2,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { BrowserHost } from './host';
+import { IdleReaper, resolveIdleTimeoutMs } from './idle';
 import { Journal, pruneLogSessions } from './journal';
 import { RelayProxy } from './relay';
 import { loadProxyConfig, resolveProfile } from '../shared/proxyStore';
@@ -49,12 +50,22 @@ async function main(): Promise<void> {
   const userAgent = argValue('--ua');
   const cdpUrl = argValue('--cdp');
   const stealth = process.argv.includes('--stealth');
+  // アイドル自動終了の閾値(ms)。0 なら無効。--idle-timeout(秒)> KB_IDLE_TIMEOUT(秒)> 既定 30 分。
+  const idleArgSec = argValue('--idle-timeout');
+  const idleMs = resolveIdleTimeoutMs(idleArgSec, process.env.KB_IDLE_TIMEOUT);
+  const idleTimeoutSec = Math.round(idleMs / 1000); // status 用(0 = 無効)
+  // last-run には明示指定(argv)だけを記録する(channel/ua と同じ扱い)。env/既定から解決した値を
+  // 焼き込むと、以後の spawn で last-run が引数として最優先になり KB_IDLE_TIMEOUT が二度と効かなくなる。
+  const idleLastRunSec = idleArgSec != null && idleArgSec !== '' ? idleTimeoutSec : undefined;
 
   const host = new BrowserHost();
   const relay = new RelayProxy();
   const journal = new Journal();
   const token = crypto.randomBytes(16).toString('hex');
   let shuttingDown = false;
+  let reaper: IdleReaper | null = null;
+  /** 実行中の RPC 数。0 でない間は idle reaper の発火を保留する(wait 等の長時間 RPC 保護)。 */
+  let inflightRpcs = 0;
 
   /** 操作ジャーナルに記録しない読み取り系・ログ操作系コマンド。 */
   const JOURNAL_EXCLUDE = new Set([
@@ -105,6 +116,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log(`shutdown: ${reason}`);
+    reaper?.stop();
     journal.stop();
     removeDaemonInfoIfOwned(process.pid);
     await host.stop();
@@ -139,6 +151,12 @@ async function main(): Promise<void> {
       return respond(400, { ok: false, error: 'invalid JSON body' });
     }
 
+    // 任意の RPC 受信を「活動」としてアイドルタイマーをリセットする(クライアント生存の証)。
+    // 実行中は inflightRpcs>0 が idle 発火を保留し、完了時にも touch してそこを新たな起点にする
+    // (wait 等の「閾値より長い単一 RPC」が実行中に刈り取られないように)。
+    reaper?.touch();
+    inflightRpcs++;
+
     const startedMs = Date.now();
     try {
       const result = await dispatch(rpc);
@@ -150,6 +168,9 @@ async function main(): Promise<void> {
       const message = err instanceof Error ? err.message : String(err);
       journalCommand(rpc, false, Date.now() - startedMs, undefined, message);
       respond(200, { ok: false, error: message });
+    } finally {
+      inflightRpcs--;
+      reaper?.touch();
     }
   });
 
@@ -164,7 +185,7 @@ async function main(): Promise<void> {
   async function dispatch({ cmd, args }: RpcRequest): Promise<unknown> {
     switch (cmd) {
       case 'daemon.status':
-        return { ...host.status(), proxy: relay.status().active };
+        return { ...host.status(), proxy: relay.status().active, idleTimeoutSec };
       case 'daemon.stop':
         return { stopping: true };
       case 'proxy.use':
@@ -298,13 +319,13 @@ async function main(): Promise<void> {
         return host.setDialogPolicy(args.policy);
       case 'mode.set': {
         const result = await host.setMode(!!args.headless);
-        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth });
+        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec });
         log(`mode switched: headless=${result.headless} (restored ${result.restoredTabs} tabs)`);
         return result;
       }
       case 'profile.set': {
         const result = await host.setProfile(args.name);
-        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth });
+        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec });
         log(`profile switched: ${result.profile} (restored ${result.restoredTabs} tabs)`);
         return result;
       }
@@ -376,7 +397,7 @@ async function main(): Promise<void> {
     proxy: cdpUrl ? undefined : { server: `http://127.0.0.1:${relayPort}`, ...(relayAuth ?? {}) },
   });
   // アタッチは明示起動のみの契約(自動 spawn が存在しない Chrome への接続で失敗しないよう last-run に残さない)
-  if (!cdpUrl) writeLastRun({ headless, profile, channel, userAgent, stealth });
+  if (!cdpUrl) writeLastRun({ headless, profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec });
 
   /** 操作ログセッションの meta(log.start でも使う)。 */
   const sessionMeta = () => ({
@@ -397,6 +418,15 @@ async function main(): Promise<void> {
   host.onJournalConsole = (ev) => journal.append({ type: 'console', ...ev });
   const session = journal.start(undefined, sessionMeta());
   log(`journal started: ${session.name}`);
+
+  // アイドル自動終了。RPC 受信(上の handler)とページのネット/コンソール活動(host.onActivity)を
+  // 「活動」として記録し、idleMs 無活動なら既存の shutdown 経路で自ら graceful に落ちる。
+  // タイマーは unref 済みなので他の shutdown 経路(SIGINT / ウィンドウ手動クローズ)を阻害しない。
+  host.onActivity = () => reaper?.touch();
+  reaper = new IdleReaper(idleMs, () => void shutdown('idle timeout'));
+  reaper.isBusy = () => inflightRpcs > 0;
+  reaper.start();
+  log(idleMs > 0 ? `idle reaper enabled: timeout=${idleTimeoutSec}s` : 'idle reaper disabled');
 
   server.listen(0, '127.0.0.1', () => {
     const address = server.address();

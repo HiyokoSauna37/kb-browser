@@ -5,6 +5,14 @@ import { LOG_CAP, TEXT_CAP, TEXT_CONTENT_RE, type NetEntry, type RouteRule } fro
 
 /** HAR に本文を含めるサイズ上限。 */
 const HAR_BODY_CAP = 256 * 1024;
+/**
+ * HAR 記録のエントリ件数上限と本文合計バイト上限。
+ * 他のバッファはリングバッファで古いものを捨てるが、HAR は「完全な記録」に意味があるため
+ * 黙って古いエントリを落とさない。上限到達時は新規エントリの記録を停止し(既存分は保持)、
+ * truncated フラグと HAR log.comment で欠落を明示する。
+ */
+const HAR_MAX_ENTRIES = 10_000;
+const HAR_MAX_BODY_BYTES = 128 * 1024 * 1024;
 /** net body 捕捉のエントリあたりサイズ上限(超過分は先頭のみ保持)。 */
 const NET_BODY_CAP = 256 * 1024;
 /** net body ストア全体の上限(件数 / バイト数)。超えたら古い本文から捨てる。 */
@@ -33,7 +41,7 @@ export class NetMonitor {
   private netHeaders = new Map<number, { request: Record<string, string>; response: Record<string, string> }>();
   private routes = new Map<number, RouteRule & { handler: (route: Route) => void }>();
   private nextRouteId = 1;
-  private har: { startedAt: string; entries: unknown[] } | null = null;
+  private har: { startedAt: string; entries: unknown[]; bodyBytes: number; truncated: boolean } | null = null;
 
   /** 操作ジャーナル用フック(main.ts が設定)。xhr/fetch/document/other の通信を全ヘッダ付きで通知する。 */
   onJournalNet: (ev: {
@@ -285,29 +293,38 @@ export class NetMonitor {
 
   harStart(): { recording: boolean } {
     if (this.har) throw new Error('HAR は既に記録中です。kb net har stop で保存してから開始してください。');
-    this.har = { startedAt: new Date().toISOString(), entries: [] };
+    this.har = { startedAt: new Date().toISOString(), entries: [], bodyBytes: 0, truncated: false };
     return { recording: true };
   }
 
   harStop(): unknown {
     if (!this.har) throw new Error('HAR は記録中ではありません。kb net har start で開始してください。');
-    const har = {
-      log: {
-        version: '1.2',
-        creator: { name: 'kb-browser', version: KB_VERSION },
-        pages: [],
-        entries: this.har.entries,
-      },
+    const truncated = this.har.truncated;
+    const log: Record<string, unknown> = {
+      version: '1.2',
+      creator: { name: 'kb-browser', version: KB_VERSION },
+      pages: [],
+      entries: this.har.entries,
     };
+    // 上限で打ち切った場合は HAR が不完全であることを log.comment で明示する(HAR 標準の任意フィールド)。
+    if (truncated) {
+      log.comment = `kb: 上限(${HAR_MAX_ENTRIES} entries / ${Math.round(HAR_MAX_BODY_BYTES / (1024 * 1024))}MB)に達したため以降の記録を停止しました。この HAR は不完全です。`;
+    }
     this.har = null;
-    return har;
+    return { log };
   }
 
-  harStatus(): { recording: boolean; entries: number } {
-    return { recording: this.har != null, entries: this.har?.entries.length ?? 0 };
+  harStatus(): { recording: boolean; entries: number; truncated: boolean } {
+    return { recording: this.har != null, entries: this.har?.entries.length ?? 0, truncated: this.har?.truncated ?? false };
   }
 
   private async captureHarEntry(res: Response): Promise<void> {
+    // 既に上限到達で打ち切っているなら何もしない(黙って欠けさせず、truncated で明示済み)。
+    if (!this.har || this.har.truncated) return;
+    if (this.har.entries.length >= HAR_MAX_ENTRIES || this.har.bodyBytes >= HAR_MAX_BODY_BYTES) {
+      this.har.truncated = true;
+      return;
+    }
     try {
       const req = res.request();
       const timing = req.timing();
@@ -317,8 +334,11 @@ export class NetMonitor {
         const body = await res.body();
         if (body.length <= HAR_BODY_CAP) text = body.toString('utf8');
       }
+      // start/stop が非同期の隙間に走っても壊れないよう、await 後に har を再確認する。
+      if (!this.har || this.har.truncated) return;
+      if (text != null) this.har.bodyBytes += text.length;
       const toNv = (h: Record<string, string>) => Object.entries(h).map(([name, value]) => ({ name, value }));
-      this.har?.entries.push({
+      this.har.entries.push({
         startedDateTime: new Date().toISOString(),
         time: Math.max(timing.responseEnd, 0),
         request: {

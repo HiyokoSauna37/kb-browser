@@ -211,7 +211,12 @@ export function registerNetCommands(program: Command): void {
         const harData = await rpc('net.har.stop');
         const outPath = path.resolve(opts.out);
         fs.writeFileSync(outPath, JSON.stringify(harData, null, 2));
-        print({ path: outPath, entries: harData.log.entries.length }, (r) => `${r.path} (${r.entries} entries)`);
+        // 上限で打ち切られた場合は不完全な旨を stderr で警告する(HAR ファイル自体は log.comment に記録)。
+        if (harData.log.comment) console.error(`警告: ${harData.log.comment}`);
+        print(
+          { path: outPath, entries: harData.log.entries.length, truncated: !!harData.log.comment },
+          (r) => `${r.path} (${r.entries} entries${r.truncated ? ', truncated' : ''})`,
+        );
       }),
     );
 
@@ -221,7 +226,9 @@ export function registerNetCommands(program: Command): void {
     .action(
       run(async () => {
         const result = await rpc('net.har.status');
-        print(result, (r) => (r.recording ? `記録中 (${r.entries} entries)` : '記録していません'));
+        print(result, (r) =>
+          r.recording ? `記録中 (${r.entries} entries${r.truncated ? ', 上限到達で打ち切り' : ''})` : '記録していません',
+        );
       }),
     );
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { rpc } from './shared/client';
+import { pingDaemon, rpc, rpcRaw, spawnedDaemonHere } from './shared/client';
 import { loadProxyConfig, saveProxyConfig } from './shared/proxyStore';
 import { KB_VERSION } from './shared/version';
 
@@ -336,8 +336,41 @@ tool(
 
 tool('kb_status', 'デーモンの状態を取得する。', {}, safe(async () => text(await rpc('daemon.status'))));
 
+/**
+ * このプロセスの生存中に自動起動したデーモンを、切断時にベストエフォートで後片付けする。
+ * Claude Code が切断して kb-mcp が死んでも、生んだデーモン+ブラウザが残らないようにする。
+ * 既に走っていたデーモンに相乗りしただけ(spawnedDaemonHere() === false)なら止めない
+ * (CLI 併用ユーザのデーモンを壊さないため)。デーモン側のアイドル自動終了(idle reaper)が
+ * さらに漏れない安全網になる(SIGKILL でこの片付けが走らなくても最終的に回収される)。
+ */
+let cleaningUp = false;
+async function cleanup(): Promise<void> {
+  if (cleaningUp) return;
+  cleaningUp = true;
+  if (!spawnedDaemonHere()) return;
+  try {
+    const info = await pingDaemon();
+    if (info) await rpcRaw(info, 'daemon.stop');
+  } catch {
+    /* ベストエフォート(既に落ちている等は無視) */
+  }
+}
+
+/** cleanup してからプロセスを終える(多重呼び出しに耐える)。 */
+function cleanupAndExit(code = 0): void {
+  void cleanup().finally(() => process.exit(code));
+}
+
 async function main(): Promise<void> {
-  await server.connect(new StdioServerTransport());
+  const transport = new StdioServerTransport();
+  // stdio トランスポートの終了(= Claude Code 側の切断)を最も確実な後片付けトリガにする。
+  transport.onclose = () => cleanupAndExit(0);
+  await server.connect(transport);
+
+  // シグナルと stdin クローズも保険として拾う(環境によりどれが来るかが異なるため)。
+  process.on('SIGINT', () => cleanupAndExit(0));
+  process.on('SIGTERM', () => cleanupAndExit(0));
+  process.stdin.on('close', () => cleanupAndExit(0));
 }
 
 main().catch((err) => {
