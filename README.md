@@ -26,6 +26,7 @@ Everything a GUI browser gives you — page rendering, cookie management, DevToo
 - **Daemon architecture** — the browser stays resident; every CLI command returns in tens of milliseconds
 - **Real Chrome** — uses your installed Chrome/Edge (DRM works), falling back to bundled Chromium; pick explicitly with `--channel`, override the User-Agent with `--ua`, or present as a regular (non-automation) browser with `--stealth` for authorized testing
 - **Attach to a running browser** — `kb daemon start --cdp http://127.0.0.1:9222` connects to a Chrome/Edge started with `--remote-debugging-port` and reuses its signed-in state
+- **Chrome extensions** — `kb daemon start --extensions <dir,...>` loads unpacked extensions (`on` enables extensions already installed in the profile, `off` turns it back off). See [Chrome extensions](#chrome-extensions)
 - **Agent-optimized** — `kb snapshot` returns an accessibility tree with element refs; `kb click --ref e12` acts on them reliably (including inside iframes), and stale refs are **auto re-resolved** to the element with the same role/name after re-renders. Long outputs (text / html / snapshot) are capped at 20,000 chars by default with `--offset` paging. `kb eval` accepts `await` and multi-line code as-is
 - **DevTools from the terminal** — network log / response bodies (`kb net body`) / full headers (`kb net headers`) / request blocking / response mocking (including overriding live endpoints with error responses) / HAR recording / console / DOM inspection
 - **Mini REST client** — `kb request` hits APIs directly without opening a page; cookies and proxy settings are shared with the browser (call authenticated APIs as-is)
@@ -64,7 +65,7 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 
 | Category | Commands |
 |---|---|
-| Daemon | `kb daemon start [--headless] [--profile <n>] [--channel chrome\|msedge\|chromium] [--ua <s>] [--stealth] [--cdp <url>] / stop / status` |
+| Daemon | `kb daemon start [--headless] [--profile <n>] [--channel chrome\|msedge\|chromium] [--ua <s>] [--stealth] [--extensions <dirs\|on\|off>] [--cdp <url>] / stop / status` |
 | Pages | `kb open <url> [-n] [--wait idle]` / `kb tabs [close/switch <id>]` / `kb text` / `kb html` / `kb snapshot` / `kb screenshot [<sel>\|--ref e12] [-f] [--timeout <sec>]` (element-level supported) / `kb pdf` (headless only) |
 | Navigation | `kb back` / `kb forward` / `kb reload` / `kb scroll [--to <sel>/--bottom]` |
 | Interaction | `kb click` / `kb fill` / `kb select [--label]` / `kb check` / `kb uncheck` / `kb hover` / `kb upload <sel> <local file path...>` / `kb press <key>` / `kb eval <js> [--file f.js]` (`await` & multi-line OK; returns the last expression) — target via CSS selector, `--ref e12` (from snapshot), or `--frame <sel>` (inside iframe) |
@@ -152,6 +153,26 @@ Constraints:
 - **Chrome 136+ disables remote debugging on the everyday default profile** (a security change). Start with a dedicated `--user-data-dir` as shown above and sign in to your services there once — the state sticks to that profile.
 - Since kb can't change how the target browser was launched, `kb mode` / `kb profile` / `kb auth` and kb's proxy-profile switching are unavailable while attached (they return a clear error).
 - Everything else — open / click / snapshot / eval / screenshot / net log / net body / cookies / storage — works.
+
+## Chrome extensions
+
+Playwright launches Chromium with extensions disabled (`--disable-extensions`) by default; `--extensions` lifts that:
+
+```bash
+kb daemon start --extensions "C:\dev\my-extension"      # load unpacked extension(s), comma-separated
+kb daemon start --extensions on                         # enable only (use extensions already installed in the profile)
+kb daemon start --extensions off                        # back to disabled (the default)
+```
+
+- **Unpacked extensions** — point at a directory containing `manifest.json` (`.crx` files are not supported). Handy for developing and testing your own extension.
+- **Store extensions** — start with `--extensions on` in headed mode and install from the Chrome Web Store in the window as usual (chrome channel recommended). They persist in the profile, so subsequent starts only need `--extensions on`.
+- Like `--channel` / `--ua`, the setting carries over to the next auto-spawn; reset with `--extensions off`.
+
+Constraints:
+
+- **Unpacked extensions load via the bundled Chromium** (when directories are given, channel auto-selection picks bundled Chromium). Chrome 137+ stable removed the `--load-extension` flag, so real Chrome can't load them (`--extensions on` for profile-installed extensions works on any channel).
+- Works headless too (the extension-capable new headless mode is selected automatically).
+- Mutually exclusive with `--cdp` (attach) — extensions installed in the attached browser itself work as-is.
 
 ## API debugging
 

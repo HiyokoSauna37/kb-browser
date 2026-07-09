@@ -45,6 +45,10 @@ export interface LastRunOptions {
   stealth?: boolean;
   /** アイドル自動終了の閾値(秒)。0 は無効。自動 spawn が引き継ぐ。 */
   idleTimeoutSec?: number;
+  /** Chrome 拡張機能。空配列 = プロファイル拡張の有効化のみ、要素 = 未パック拡張の絶対パス。 */
+  extensions?: string[];
+  /** HTTPS 証明書エラーを無視する。自動 spawn が引き継ぐ。 */
+  ignoreHttpsErrors?: boolean;
 }
 
 export function ensureKbHome(): void {
@@ -106,6 +110,8 @@ export function readLastRun(): LastRunOptions | null {
       userAgent: raw.userAgent,
       stealth: !!raw.stealth,
       idleTimeoutSec: typeof raw.idleTimeoutSec === 'number' ? raw.idleTimeoutSec : undefined,
+      extensions: Array.isArray(raw.extensions) ? raw.extensions.filter((x) => typeof x === 'string') : undefined,
+      ignoreHttpsErrors: !!raw.ignoreHttpsErrors,
     };
   } catch {
     return null;

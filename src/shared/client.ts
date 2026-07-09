@@ -135,6 +135,10 @@ export function spawnDaemon(
     stealth?: boolean;
     /** アイドル自動終了の閾値(秒)。0 で無効。未指定なら last-run を継承し、それも無ければデーモン側の既定。 */
     idleTimeoutSec?: number;
+    /** Chrome 拡張機能。空配列 = 有効化のみ、要素 = 未パック拡張の絶対パス。'off' は明示リセット(継承しない)。 */
+    extensions?: string[] | 'off';
+    /** HTTPS 証明書エラーを無視する。明示 start は concrete boolean、自動 spawn は undefined → last-run 継承。 */
+    ignoreHttpsErrors?: boolean;
   } = {},
 ): ChildProcess | null {
   const last = readLastRun();
@@ -149,6 +153,10 @@ export function spawnDaemon(
     // アイドル閾値は headless/profile と同様に自動 spawn が last-run を継承する。undefined の
     // ときは引数を渡さず、デーモン側で KB_IDLE_TIMEOUT / 既定にフォールバックさせる。
     idleTimeoutSec: opts.idleTimeoutSec ?? last?.idleTimeoutSec,
+    // 拡張機能は channel/ua と同じ扱い: 'off' で明示リセット、未指定なら last-run を継承。
+    extensions: opts.extensions === 'off' ? undefined : (opts.extensions ?? last?.extensions),
+    // stealth と同じ扱い: 明示 start は concrete boolean、自動 spawn は undefined → last-run 継承。
+    ignoreHttpsErrors: opts.ignoreHttpsErrors ?? last?.ignoreHttpsErrors ?? false,
   };
   if (!acquireSpawnLock()) return null;
   const daemonJs = path.join(__dirname, '..', 'daemon', 'main.js');
@@ -158,7 +166,9 @@ export function spawnDaemon(
   if (merged.channel) args.push('--channel', merged.channel);
   if (merged.userAgent) args.push('--ua', merged.userAgent);
   if (merged.stealth) args.push('--stealth');
+  if (merged.ignoreHttpsErrors) args.push('--ignore-https-errors');
   if (merged.idleTimeoutSec != null) args.push('--idle-timeout', String(merged.idleTimeoutSec));
+  if (merged.extensions) args.push('--extensions', merged.extensions.length ? merged.extensions.join(',') : 'on');
   // アタッチは明示起動 (kb daemon start --cdp) のみ。last-run からは継承しない
   if (opts.cdpUrl) args.push('--cdp', opts.cdpUrl);
   const child = spawn(process.execPath, args, {
@@ -223,7 +233,7 @@ export async function rpc(cmd: string, args: Record<string, unknown> = {}): Prom
       const status = await rpcRaw(info, 'daemon.status').catch(() => null);
       if (status) {
         console.error(
-          `kb: デーモンを自動起動しました (headless=${status.headless}, profile=${status.profile}, channel=${status.channel}${status.stealth ? ', stealth' : ''})`,
+          `kb: デーモンを自動起動しました (headless=${status.headless}, profile=${status.profile}, channel=${status.channel}${status.stealth ? ', stealth' : ''}${status.extensions ? `, extensions=${status.extensions.length || 'on'}` : ''})`,
         );
       }
     } finally {

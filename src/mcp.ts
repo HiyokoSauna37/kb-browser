@@ -297,13 +297,14 @@ tool(
   {
     url: z.string().optional().describe('URL glob (例: "**dashboard**")'),
     selector: z.string().optional().describe('現れるまで待つ CSS セレクタ'),
+    selectorGone: z.string().optional().describe('消える(非表示/DOM から除去)まで待つ CSS セレクタ。ボット検出チャレンジの通過検知など'),
     idle: z.boolean().optional().describe('ネットワークが落ち着くまで待つ (SPA の描画待ち)'),
     any: z.boolean().optional().describe('複数条件のどれか 1 つで待機を終える (OR)'),
     timeoutSec: z.number().optional().describe('タイムアウト秒(既定 90、最大 280)'),
     tab,
   },
-  safe(async ({ url, selector, idle, any, timeoutSec, tab }) =>
-    text(await rpc('wait', { url, selector, idle, any, timeoutMs: Math.min(timeoutSec ?? 90, 280) * 1000, tab })),
+  safe(async ({ url, selector, selectorGone, idle, any, timeoutSec, tab }) =>
+    text(await rpc('wait', { url, selector, selectorGone, idle, any, timeoutMs: Math.min(timeoutSec ?? 90, 280) * 1000, tab })),
   ),
 );
 

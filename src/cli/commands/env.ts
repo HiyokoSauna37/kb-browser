@@ -80,16 +80,18 @@ export function registerEnvCommands(program: Command): void {
     .description('条件を満たすまで待機する(手動ログイン等の完了待ちに使う)。注意: 呼び出し側のシェルタイムアウトはこれより長く取ること')
     .option('--url <glob>', 'URL がこの glob に一致するまで (例: "**/dashboard**")')
     .option('--selector <sel>', 'この CSS セレクタが現れるまで')
+    .option('--selector-gone <sel>', 'この CSS セレクタが消える(非表示/DOM から除去)まで。ボット検出チャレンジの通過検知などに')
     .option('--idle', 'ネットワークが落ち着くまで (SPA の描画待ちに)')
     .option('--any', '複数条件のどれか 1 つで待機を終える(既定はすべて満たすまで待つ AND)')
     .option('--timeout <sec>', 'タイムアウト秒数 (既定 90、最大 280)', intOpt, 90)
     .option('-t, --tab <id>', '対象タブ ID', intOpt)
     .action(
-      run(async (opts: { url?: string; selector?: string; idle?: boolean; any?: boolean; timeout: number; tab?: number }) => {
+      run(async (opts: { url?: string; selector?: string; selectorGone?: string; idle?: boolean; any?: boolean; timeout: number; tab?: number }) => {
         const timeoutMs = Math.min(opts.timeout, 280) * 1000;
         const result = await rpc('wait', {
           url: opts.url,
           selector: opts.selector,
+          selectorGone: opts.selectorGone,
           idle: opts.idle,
           any: opts.any,
           timeoutMs,
@@ -102,27 +104,41 @@ export function registerEnvCommands(program: Command): void {
   program
     .command('login [url]')
     .description(
-      'サービスに手動でサインインする: headed に切り替えて URL を開き、完了を待って保存状態を確認する。' +
-        'ログイン状態はプロファイルに自動保存され、次回以降のセッションでも維持される',
+      'サービスに手動でサインイン(またはボット検出チャレンジを通過)する: headed に切り替えて URL を開き、' +
+        '完了を待って保存状態を確認する。ログイン状態やチャレンジ通過 Cookie(cf_clearance 等)はプロファイルに' +
+        '自動保存され、次回以降のセッションでも維持される',
     )
-    .option('--until <glob>', 'この URL glob に一致したら完了とみなす (例: "**/dashboard**")。省略時は Enter 押下で完了')
-    .option('--timeout <sec>', '--until の待機タイムアウト秒 (既定 280)', intOpt, 280)
+    .option('--until <glob>', 'この URL glob に一致したら完了 (例: "**/dashboard**")')
+    .option('--until-selector <sel>', 'この CSS セレクタが現れたら完了(ログイン後にだけ出る要素など)')
+    .option('--until-gone <sel>', 'この CSS セレクタが消えたら完了(Cloudflare 等のチャレンジ iframe が消える = 通過)')
+    .option('--timeout <sec>', '完了条件の待機タイムアウト秒 (既定 280)。条件未指定時は Enter 押下で完了', intOpt, 280)
     .option('--save <file>', '完了後に storage dump をこのファイルにも保存する(別プロファイル/別マシンへの持ち出し用)')
     .action(
-      run(async (url: string | undefined, opts: { until?: string; timeout: number; save?: string }) => {
+      run(async (url: string | undefined, opts: { until?: string; untilSelector?: string; untilGone?: string; timeout: number; save?: string }) => {
         const before = await rpc('daemon.status');
         if (before.headless) {
           await rpc('mode.set', { headless: false });
           console.error('(headless だったため headed に切り替えました)');
         }
         if (url) await rpc('open', { url });
-        if (opts.until) {
-          await rpc('wait', { url: opts.until, timeoutMs: Math.min(opts.timeout, 280) * 1000 });
+        // url / selector / selector-gone のどれかが指定されていれば、最初に満たされた条件で完了する(any=true)。
+        // どれも無ければ従来どおり Enter 押下(手動でサインイン/チャレンジ通過を見届けてもらう)。
+        if (opts.until || opts.untilSelector || opts.untilGone) {
+          await rpc('wait', {
+            url: opts.until,
+            selector: opts.untilSelector,
+            selectorGone: opts.untilGone,
+            any: true,
+            timeoutMs: Math.min(opts.timeout, 280) * 1000,
+          });
         } else {
           if (!process.stdin.isTTY) {
-            throw new Error('対話端末ではないため Enter 待ちができません。--until "<URL glob>" で完了条件を指定してください (例: --until "**/dashboard**")');
+            throw new Error(
+              '対話端末ではないため Enter 待ちができません。完了条件を指定してください: ' +
+                '--until "<URL glob>" / --until-selector "<CSS>" / --until-gone "<CSS>"',
+            );
           }
-          await promptEnter('ブラウザでサインインを完了したら Enter を押してください... ');
+          await promptEnter('ブラウザでサインイン(またはチャレンジ通過)を完了したら Enter を押してください... ');
         }
         const state = await rpc('storage.dump');
         const profile = (await rpc('daemon.status')).profile;

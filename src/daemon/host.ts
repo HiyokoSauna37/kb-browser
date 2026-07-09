@@ -94,9 +94,12 @@ export class BrowserHost {
   onJournalConsole: (ev: { kind: string; text: string; tab: number }) => void = () => {};
 
   async start(opts: HostOptions): Promise<void> {
-    // アタッチ(--cdp)では stealth の起動フラグも init 相当も適用できない。CLI でも排他だが、
-    // 別経路(デーモン直接起動等)で両方来ても status() が嘘をつかないよう stealth を落として正規化する。
-    this.opts = opts.cdpUrl ? { ...opts, stealth: false } : opts;
+    // アタッチ(--cdp)では stealth / extensions / ignoreHTTPSErrors の起動フラグを適用できない
+    // (context はアタッチ先が生成済み)。CLI でも排他だが、別経路(デーモン直接起動等)で両方来ても
+    // status() が嘘をつかないよう落として正規化する。
+    this.opts = opts.cdpUrl
+      ? { ...opts, stealth: false, extensions: undefined, ignoreHttpsErrors: false, ignoreCertErrorsSpkiList: undefined }
+      : opts;
     await this.launch(this.opts);
   }
 
@@ -123,9 +126,18 @@ export class BrowserHost {
   /** 自前でブラウザを起動する(通常モード)。channel 明示指定時はフォールバックしない。 */
   private async launchOwned(opts: HostOptions): Promise<void> {
     const userDataDir = path.join(PROFILES_DIR, opts.profile);
+    const hasExt = opts.extensions != null;
+    // 拡張機能ロード時、「同梱 Chromium」は undefined でなく明示 channel 'chromium' として渡す。
+    // undefined + headless だと Playwright は旧 headless(headless shell)を選び拡張が一切
+    // ロードされないため(channel 'chromium' は同一バイナリで新 headless を使う)。
+    const bundled = hasExt ? 'chromium' : undefined;
     const candidates: (string | undefined)[] = opts.channel
-      ? [opts.channel === 'chromium' ? undefined : opts.channel]
-      : ['chrome', 'msedge', undefined];
+      ? [opts.channel === 'chromium' ? bundled : opts.channel]
+      : opts.extensions?.length
+        ? // 未パック拡張の --load-extension は Chrome 137+ の stable では無視される(サイドロード
+          // マルウェア対策で削除)ため、自動選択では chrome/msedge を飛ばして同梱 Chromium を使う。
+          [bundled]
+        : ['chrome', 'msedge', bundled];
     const errors: string[] = [];
     let launched = false;
     for (const channel of candidates) {
@@ -137,10 +149,23 @@ export class BrowserHost {
           proxy: opts.proxy,
           httpCredentials: opts.httpCredentials,
           userAgent: opts.userAgent,
+          // HTTPS 証明書エラーを無視する(自己署名 / 未信頼 CA の MITM プロキシ向け escape hatch)。
+          // context.request(kb request)も context の設定を継承するため同じく無視される。
+          ignoreHTTPSErrors: opts.ignoreHttpsErrors,
           // ステルス: navigator.webdriver を実 Chrome 同様に消す(JS で defineProperty するより
           // フラグで生やさない方が痕跡が残らない)。計測上、これだけで chrome チャネルの
           // JS レベルの自動化シグナルはほぼ実 Chrome と一致する。
-          args: opts.stealth ? ['--disable-blink-features=AutomationControlled'] : undefined,
+          args: [
+            ...(opts.stealth ? ['--disable-blink-features=AutomationControlled'] : []),
+            ...(opts.extensions?.length ? [`--load-extension=${opts.extensions.join(',')}`] : []),
+            // OS ストア非経由の CA 信頼: この SPKI の証明書だけエラーを許可する(全無検証ではない)
+            ...(opts.ignoreCertErrorsSpkiList?.length
+              ? [`--ignore-certificate-errors-spki-list=${opts.ignoreCertErrorsSpkiList.join(',')}`]
+              : []),
+          ],
+          // 拡張機能有効時は Playwright 既定の --disable-extensions を外す。これで
+          // プロファイルにインストール済みの拡張(ストア由来)もロードされる。
+          ignoreDefaultArgs: hasExt ? ['--disable-extensions'] : undefined,
         });
         this.channel = channel ?? 'bundled chromium';
         launched = true;
@@ -926,7 +951,7 @@ export class BrowserHost {
    * 複数指定時は既定で AND(全条件を並列に待つ)、any=true で OR(どれか 1 つ)。
    */
   async waitFor(
-    opts: { url?: string; selector?: string; idle?: boolean; any?: boolean; timeoutMs: number },
+    opts: { url?: string; selector?: string; selectorGone?: string; idle?: boolean; any?: boolean; timeoutMs: number },
     tabId?: number,
   ): Promise<{ url: string; matched: string[] }> {
     // ダイアログ応答待ち中でも待機は開始できる(ユーザーがウィンドウ上で応答するのを待つ用途)。
@@ -938,6 +963,13 @@ export class BrowserHost {
       conds.push({
         name: `selector=${opts.selector}`,
         wait: async () => void (await page.waitForSelector(opts.selector!, { timeout: opts.timeoutMs, state: 'visible' })),
+      });
+    // selectorGone: 要素が消える(hidden または DOM から detach)まで待つ。ボット検出の
+    // チャレンジ iframe が消える = 通過、を検知する用途(kb login --until-gone / kb wait --selector-gone)。
+    if (opts.selectorGone)
+      conds.push({
+        name: `selector-gone=${opts.selectorGone}`,
+        wait: async () => void (await page.waitForSelector(opts.selectorGone!, { timeout: opts.timeoutMs, state: 'hidden' })),
       });
     if (opts.idle) conds.push({ name: 'idle', wait: () => page.waitForLoadState('networkidle', { timeout: opts.timeoutMs }) });
     if (!conds.length) conds.push({ name: 'load', wait: () => page.waitForLoadState('load', { timeout: opts.timeoutMs }) });
@@ -1114,6 +1146,9 @@ export class BrowserHost {
       httpAuth: this.opts?.httpCredentials != null,
       ...(this.attached ? { attached: this.opts?.cdpUrl } : {}),
       ...(this.opts?.stealth ? { stealth: true } : {}),
+      ...(this.opts?.extensions ? { extensions: this.opts.extensions } : {}),
+      ...(this.opts?.ignoreHttpsErrors ? { ignoreHttpsErrors: true } : {}),
+      ...(this.opts?.ignoreCertErrorsSpkiList?.length ? { trustedCaSpki: this.opts.ignoreCertErrorsSpkiList.length } : {}),
       ...(this.pendingDialogs.size ? { pendingDialogs: [...this.pendingDialogs.keys()] } : {}),
       ...(this.dialogPolicy !== 'hold' ? { dialogPolicy: this.dialogPolicy } : {}),
     };

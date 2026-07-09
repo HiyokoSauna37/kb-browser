@@ -7,6 +7,7 @@ import { Journal, pruneLogSessions } from './journal';
 import { RelayProxy } from './relay';
 import { loadProxyConfig, resolveProfile } from '../shared/proxyStore';
 import { clipStr, summarizeArgs } from '../shared/oplog';
+import { splitExtensionsArg } from '../shared/util';
 import {
   DAEMON_LOG_PATH,
   ensureKbHome,
@@ -50,6 +51,10 @@ async function main(): Promise<void> {
   const userAgent = argValue('--ua');
   const cdpUrl = argValue('--cdp');
   const stealth = process.argv.includes('--stealth');
+  const ignoreHttpsErrors = process.argv.includes('--ignore-https-errors');
+  // 拡張機能: 'on' = プロファイル拡張の有効化のみ、csv = 未パック拡張ディレクトリ(絶対パス)
+  const extensionsArg = argValue('--extensions');
+  const extensions = extensionsArg == null ? undefined : splitExtensionsArg(extensionsArg);
   // アイドル自動終了の閾値(ms)。0 なら無効。--idle-timeout(秒)> KB_IDLE_TIMEOUT(秒)> 既定 30 分。
   const idleArgSec = argValue('--idle-timeout');
   const idleMs = resolveIdleTimeoutMs(idleArgSec, process.env.KB_IDLE_TIMEOUT);
@@ -319,13 +324,13 @@ async function main(): Promise<void> {
         return host.setDialogPolicy(args.policy);
       case 'mode.set': {
         const result = await host.setMode(!!args.headless);
-        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec });
+        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec, extensions, ignoreHttpsErrors });
         log(`mode switched: headless=${result.headless} (restored ${result.restoredTabs} tabs)`);
         return result;
       }
       case 'profile.set': {
         const result = await host.setProfile(args.name);
-        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec });
+        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec, extensions, ignoreHttpsErrors });
         log(`profile switched: ${result.profile} (restored ${result.restoredTabs} tabs)`);
         return result;
       }
@@ -336,7 +341,7 @@ async function main(): Promise<void> {
       }
       case 'wait':
         return host.waitFor(
-          { url: args.url, selector: args.selector, idle: !!args.idle, any: !!args.any, timeoutMs: args.timeoutMs ?? 120_000 },
+          { url: args.url, selector: args.selector, selectorGone: args.selectorGone, idle: !!args.idle, any: !!args.any, timeoutMs: args.timeoutMs ?? 120_000 },
           args.tab,
         );
       case 'emulate':
@@ -384,8 +389,13 @@ async function main(): Promise<void> {
 
   log(
     `starting (headless=${headless}, profile=${profile}, channel=${channel ?? 'auto'}, ua=${userAgent ? 'custom' : 'default'}, ` +
-      `stealth=${stealth}, attach=${cdpUrl ?? 'no'}, proxy=${relay.status().active}, relayPort=${relayPort}, relayAuth=${!!relayAuth})`,
+      `stealth=${stealth}, ignoreHttpsErrors=${ignoreHttpsErrors}, extensions=${extensions ? (extensions.length || 'on') : 'no'}, attach=${cdpUrl ?? 'no'}, proxy=${relay.status().active}, relayPort=${relayPort}, relayAuth=${!!relayAuth})`,
   );
+  // OS ストア非経由で信頼する CA(proxy add --ca / trust-ca --scoped で各プロファイルに保存した SPKI)を
+  // 全プロファイルから収集し、Chromium の --ignore-certificate-errors-spki-list へ渡す(該当証明書のみ許可)。
+  const caSpkiList = Object.values(loadProxyConfig().profiles)
+    .map((p) => (p.type !== 'direct' ? p.caSpki : undefined))
+    .filter((s): s is string => !!s);
   await host.start({
     headless,
     profile,
@@ -393,11 +403,14 @@ async function main(): Promise<void> {
     userAgent,
     cdpUrl,
     stealth,
+    extensions,
+    ignoreHttpsErrors,
+    ignoreCertErrorsSpkiList: caSpkiList,
     // アタッチ先ブラウザのプロキシは変更できないため、通常起動時のみ中継を向ける
     proxy: cdpUrl ? undefined : { server: `http://127.0.0.1:${relayPort}`, ...(relayAuth ?? {}) },
   });
   // アタッチは明示起動のみの契約(自動 spawn が存在しない Chrome への接続で失敗しないよう last-run に残さない)
-  if (!cdpUrl) writeLastRun({ headless, profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec });
+  if (!cdpUrl) writeLastRun({ headless, profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec, extensions, ignoreHttpsErrors });
 
   /** 操作ログセッションの meta(log.start でも使う)。 */
   const sessionMeta = () => ({

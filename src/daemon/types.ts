@@ -14,11 +14,31 @@ export interface HostOptions {
   /** 既存ブラウザへのアタッチ (connectOverCDP)。指定時は launch せずこの CDP エンドポイントへ接続する。 */
   cdpUrl?: string;
   /**
+   * HTTPS 証明書エラーを無視する (context の ignoreHTTPSErrors)。自己署名証明書のローカル環境や、
+   * CA を信頼させていない MITM デバッグプロキシ(Charles / Fiddler 等)の escape hatch。
+   * 自前起動時のみ有効(アタッチ先の context 生成条件は変更できない)。
+   */
+  ignoreHttpsErrors?: boolean;
+  /**
+   * OS ストアを触らずに信頼する CA の SPKI ハッシュ(SHA-256/DER の base64)一覧。
+   * Chromium の --ignore-certificate-errors-spki-list に渡され、**該当証明書だけ**の
+   * 証明書エラーを許可する(ignoreHTTPSErrors のような全無検証ではない)。
+   * proxies.json の各プロファイルの caSpki から起動時に収集する。
+   */
+  ignoreCertErrorsSpkiList?: string[];
+  /**
    * ステルスモード。`--disable-blink-features=AutomationControlled` を付けて
    * navigator.webdriver を実 Chrome 同様に消し、最小限の init script で JS レベルの
    * 綻びを均す。自前起動時のみ有効(アタッチは元から実ブラウザなので不要)。
    */
   stealth?: boolean;
+  /**
+   * Chrome 拡張機能。指定時は Playwright 既定の --disable-extensions を外して
+   * プロファイルにインストール済みの拡張を有効化し、配列の各ディレクトリ(解凍済み拡張)を
+   * --load-extension でロードする。空配列 = 有効化のみ(ストア等から入れた拡張を使う)。
+   * 自前起動時のみ有効。
+   */
+  extensions?: string[];
 }
 
 export interface TabInfo {

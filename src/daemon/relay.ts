@@ -208,42 +208,26 @@ export class RelayProxy {
 
   /** profile 経由で host:port への生 TCP ソケットを確立する。 */
   async connectVia(profile: ProxyProfile, host: string, port: number): Promise<net.Socket> {
-    switch (profile.type) {
-      case 'direct':
-        return connectTcp(port, host, CONNECT_TIMEOUT_MS);
-      case 'http': {
-        const socket = await connectTcp(profile.port, profile.host, CONNECT_TIMEOUT_MS);
-        let header = `CONNECT ${hostHeader(host)}:${port} HTTP/1.1\r\nHost: ${hostHeader(host)}:${port}\r\n`;
-        if (profile.username) header += `Proxy-Authorization: ${basicAuth(profile)}\r\n`;
-        socket.write(header + '\r\n');
-        await readConnectResponse(socket, CONNECT_TIMEOUT_MS);
-        return socket;
-      }
-      case 'socks5': {
-        const { socket } = await SocksClient.createConnection({
-          proxy: {
-            host: profile.host,
-            port: profile.port,
-            type: 5,
-            userId: profile.username,
-            password: profile.password,
-          },
-          command: 'connect',
-          destination: { host, port },
-          timeout: CONNECT_TIMEOUT_MS,
-        });
-        return socket;
-      }
-    }
+    return connectViaProxy(profile, host, port, CONNECT_TIMEOUT_MS);
   }
 
-  /** 外部 IP 確認サイトに profile 経由でアクセスして疎通確認する。 */
-  async testUpstream(profile: ProxyProfile): Promise<{ ip: string; latencyMs: number }> {
+  /**
+   * 外部 IP 確認サイトに profile 経由でアクセスして疎通確認する。
+   * ブラウザは OS ストア / --ca で信頼した MITM 検査プロキシの証明書を通すため、test も
+   * 証明書エラーでは落とさず(到達性 + 外部 IP を見るのが目的)、信頼状況は tlsTrusted / tlsNote で返す
+   * (「ブラウジングは成功するのに proxy test だけ失敗」という偽陰性を防ぐ)。
+   */
+  async testUpstream(profile: ProxyProfile): Promise<{ ip: string; latencyMs: number; tlsTrusted: boolean; tlsNote?: string }> {
     const HOST = 'api.ipify.org';
     const started = Date.now();
     const raw = await this.connectVia(profile, HOST, 443);
-    const socket = tls.connect({ socket: raw, servername: HOST });
+    const socket = tls.connect({ socket: raw, servername: HOST, rejectUnauthorized: false });
     await once(socket, 'secureConnect');
+    const tlsTrusted = socket.authorized;
+    const tlsNote = tlsTrusted
+      ? undefined
+      : `TLS 証明書は Node の CA バンドルでは未検証 (${socket.authorizationError || 'unknown'})。` +
+        `HTTPS を復号する検査プロキシなら想定どおり。ブラウザが OS ストア / kb proxy trust-ca / --ca で信頼していれば実ブラウジングは成功します。`;
     socket.write(`GET / HTTP/1.1\r\nHost: ${HOST}\r\nConnection: close\r\n\r\n`);
     const chunks: Buffer[] = [];
     socket.on('data', (c) => chunks.push(c));
@@ -252,11 +236,50 @@ export class RelayProxy {
     const body = Buffer.concat(chunks).toString('utf8');
     const ip = /(\d{1,3}\.){3}\d{1,3}/.exec(body)?.[0] ?? body.split('\r\n\r\n')[1]?.trim() ?? '';
     if (!ip) throw new Error('疎通確認に失敗しました(レスポンスを解析できません)');
-    return { ip, latencyMs: Date.now() - started };
+    return { ip, latencyMs: Date.now() - started, tlsTrusted, tlsNote };
   }
 }
 
 // ---- helpers ----
+
+/**
+ * profile 経由で host:port への生 TCP ソケットを確立する(direct / http CONNECT / socks5)。
+ * RelayProxy と CA 信頼(kb proxy trust-ca)の両方から使う。socks5 認証もここで代行する。
+ */
+export async function connectViaProxy(
+  profile: ProxyProfile,
+  host: string,
+  port: number,
+  timeoutMs: number = CONNECT_TIMEOUT_MS,
+): Promise<net.Socket> {
+  switch (profile.type) {
+    case 'direct':
+      return connectTcp(port, host, timeoutMs);
+    case 'http': {
+      const socket = await connectTcp(profile.port, profile.host, timeoutMs);
+      let header = `CONNECT ${hostHeader(host)}:${port} HTTP/1.1\r\nHost: ${hostHeader(host)}:${port}\r\n`;
+      if (profile.username) header += `Proxy-Authorization: ${basicAuth(profile)}\r\n`;
+      socket.write(header + '\r\n');
+      await readConnectResponse(socket, timeoutMs);
+      return socket;
+    }
+    case 'socks5': {
+      const { socket } = await SocksClient.createConnection({
+        proxy: {
+          host: profile.host,
+          port: profile.port,
+          type: 5,
+          userId: profile.username,
+          password: profile.password,
+        },
+        command: 'connect',
+        destination: { host, port },
+        timeout: timeoutMs,
+      });
+      return socket;
+    }
+  }
+}
 
 /** タイムアウト付き TCP 接続。IPv6/IPv4 両対応ホストで片側が死んでいても繋がるよう happy eyeballs を有効化。 */
 function connectTcp(port: number, host: string, timeoutMs: number): Promise<net.Socket> {

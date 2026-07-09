@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BodyStore, clip, inferJsonContentType, LogBuffer, normalizeUrl, parseHeaderArgs, prepareEval } from './util';
+import { BodyStore, clip, inferJsonContentType, LogBuffer, normalizeUrl, parseHeaderArgs, prepareEval, splitExtensionsArg } from './util';
 
 /** prepareEval の出力を Node 上で実行して結果を確かめる(page.evaluate の代わり)。 */
 async function evalPrepared(code: string): Promise<unknown> {
@@ -185,4 +185,14 @@ test('LogBuffer: clear 後は空になり dropped は増えない', () => {
   const r = buf.query({ since: cursor });
   assert.deepEqual(r.entries.map((e) => e.v), [2]);
   assert.equal(r.dropped, 0);
+});
+
+test('splitExtensionsArg: on は有効化のみ(空配列)', () => {
+  assert.deepEqual(splitExtensionsArg('on'), []);
+});
+
+test('splitExtensionsArg: カンマ区切りをトリムして分解、空要素は除去', () => {
+  assert.deepEqual(splitExtensionsArg('C:\ext\a, C:\ext\b'), ['C:\ext\a', 'C:\ext\b']);
+  assert.deepEqual(splitExtensionsArg('/home/u/ext'), ['/home/u/ext']);
+  assert.deepEqual(splitExtensionsArg('a,,b,'), ['a', 'b']);
 });

@@ -23,6 +23,19 @@ export function escapeRegExp(s: string): string {
 }
 
 /**
+ * --extensions 引数値の分解。'on' は「拡張の有効化のみ」を表す空配列、
+ * それ以外はカンマ区切りの拡張ディレクトリとしてトリムして返す(空要素は除去)。
+ * 'off'(明示リセット)は呼び出し側で先に処理する想定。
+ */
+export function splitExtensionsArg(value: string): string[] {
+  if (value === 'on') return [];
+  return value
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
  * kb eval のコードを page.evaluate に渡せる形に整える。
  * - await を含まないコードはそのまま(従来どおり eval の完了値が返る)。
  * - await を含む式は `(async () => (code))()` でラップして値を返す。
