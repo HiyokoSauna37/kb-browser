@@ -234,6 +234,10 @@ export function redactEvent(event: OpEvent, o: MaskOptions): OpEvent {
           if (parsed && typeof parsed === 'object') {
             if (typeof parsed.url === 'string') parsed.url = maskUrl(parsed.url, o);
             if (parsed.headers) parsed.headers = redactHeaders(parsed.headers, o);
+            // setCookies は個別の Set-Cookie 値(セッショントークン等)。機微ヘッダと同じ方針でマスク。
+            if (Array.isArray(parsed.setCookies)) {
+              parsed.setCookies = parsed.setCookies.map((c: unknown) => maskValue('set-cookie', String(c), o));
+            }
             if (typeof parsed.body === 'string') parsed.body = maskUrlsInText(maskBody(parsed.body, o), o);
             e.result = JSON.stringify(parsed);
           }

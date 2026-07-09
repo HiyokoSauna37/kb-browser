@@ -191,7 +191,16 @@ export function registerBrowseCommands(program: Command): void {
           print(r, () => {
             let out = `HTTP ${r.status} ${r.statusText} (${r.ms}ms, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''})`;
             if (r.url !== url) out += `\n→ ${r.url}`;
-            if (opts.include) out += '\n' + Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join('\n');
+            const setCookies: string[] = r.setCookies ?? [];
+            if (opts.include) {
+              // set-cookie は複数個を個別行で出す(res.headers() の畳み込みでは 1 行に潰れて parse できないため setCookies を使う)
+              const other = Object.entries(r.headers).filter(([k]) => k.toLowerCase() !== 'set-cookie');
+              out += '\n' + other.map(([k, v]) => `${k}: ${v}`).join('\n');
+              out += setCookies.map((c) => `\nset-cookie: ${c}`).join('');
+            } else if (setCookies.length) {
+              // -i なしでも Set-Cookie はブラウザ context に反映される副作用なので常に見せる
+              out += setCookies.map((c) => `\nset-cookie: ${c}`).join('');
+            }
             if (r.savedTo) return `${out}\n本文を保存しました: ${r.savedTo}`;
             if (r.binary) return `${out}\n(バイナリ本文のため表示しません。-o <file> で保存できます)`;
             return `${out}\n\n${r.body}${truncNote(r, r.body.length)}`;

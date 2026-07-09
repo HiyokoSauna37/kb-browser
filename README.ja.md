@@ -206,6 +206,13 @@ kb request api.example.com/v2/me -H "Accept: application/vnd.api+json" -H "X-Api
 
 ページを開く必要はなく、**Cookie とプロキシ設定はブラウザと共有**されます — ブラウザでログイン済みなら認証付き API もそのまま呼べ、レスポンスの Set-Cookie もブラウザに反映されます。バイナリは `-o <file>` で保存できます。
 
+レスポンスの **Set-Cookie は既定で個別行表示**され(複数個でも 1 行に潰れず parse できます)、`-i` で全レスポンスヘッダも表示できます(MCP は `includeHeaders`)。`--json` では `result.setCookies` に個別の Set-Cookie 値が配列で入ります(`kb log export` のバンドルでは機微ヘッダ同様マスクされます)。
+
+```bash
+kb request localhost:3000/api/login -X POST -d '{"user":"a"}'   # Set-Cookie: sid=… が本文の前に表示される
+kb request localhost:3000/api/me -i                              # 全レスポンスヘッダ + 個別 Set-Cookie
+```
+
 ## 操作記録と共有バンドル
 
 デーモンは**既定で操作を常時記録**します(コマンド・xhr/fetch/document の通信・コンソール出力)。作業後に 1 コマンドで、**kb を持たない第三者がそのまま読んで追試できる**自己完結バンドルを生成できます:

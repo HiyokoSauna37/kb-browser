@@ -242,17 +242,18 @@ tool(
 
 tool(
   'kb_request',
-  'ページを開かずに HTTP リクエストを送る(ミニ REST クライアント)。Cookie とプロキシ設定はブラウザと共有され、Set-Cookie も反映される。',
+  'ページを開かずに HTTP リクエストを送る(ミニ REST クライアント)。Cookie とプロキシ設定はブラウザと共有され、Set-Cookie も反映される。レスポンスの Set-Cookie は常に表示し、全レスポンスヘッダは includeHeaders で表示する。',
   {
     url: z.string().describe('リクエスト先 URL(スキーム省略時は https)'),
     method: z.string().optional().describe('HTTP メソッド(既定 GET)'),
     headers: z.record(z.string()).optional().describe('リクエストヘッダ'),
     data: z.string().optional().describe('リクエストボディ'),
     timeoutSec: z.number().optional().describe('タイムアウト秒(既定 30)'),
+    includeHeaders: z.boolean().optional().describe('レスポンスの全ヘッダを含める(既定は Set-Cookie のみ表示)'),
     maxChars: z.number().int().optional().describe('本文の最大文字数 (0 = 無制限)'),
     offset: z.number().int().optional().describe('取得開始位置'),
   },
-  safe(async ({ url, method, headers, data, timeoutSec, maxChars, offset }) => {
+  safe(async ({ url, method, headers, data, timeoutSec, includeHeaders, maxChars, offset }) => {
     const r = await rpc('request', {
       url,
       method,
@@ -262,7 +263,16 @@ tool(
       maxChars,
       offset,
     });
-    const head = `HTTP ${r.status} ${r.statusText} (${r.ms}ms, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''})`;
+    let head = `HTTP ${r.status} ${r.statusText} (${r.ms}ms, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''})`;
+    const setCookies: string[] = r.setCookies ?? [];
+    if (includeHeaders) {
+      // set-cookie は個別行で出す(res.headers() の畳み込みでは parse できないため setCookies を使う)
+      const other = Object.entries(r.headers ?? {}).filter(([k]) => k.toLowerCase() !== 'set-cookie');
+      head += '\n' + other.map(([k, v]) => `${k}: ${v}`).join('\n');
+      head += setCookies.map((c) => `\nset-cookie: ${c}`).join('');
+    } else if (setCookies.length) {
+      head += setCookies.map((c) => `\nset-cookie: ${c}`).join('');
+    }
     if (r.binary) return text(`${head}\n(バイナリ本文のため省略)`);
     return text(withTruncNote(`${head}\n\n${r.body}`, r));
   }),

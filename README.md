@@ -206,6 +206,13 @@ Explicit `-H` headers always win (JSON auto-detection only kicks in when Content
 
 No page needed, and **cookies & proxy settings are shared with the browser** — if you're logged in in the browser, authenticated APIs just work, and `Set-Cookie` responses flow back into the browser. Save binary responses with `-o <file>`.
 
+Response **`Set-Cookie` headers are shown by default, one per line** (multiple cookies stay parseable instead of being folded into a single line), and `-i` prints all response headers (MCP: `includeHeaders`). With `--json`, `result.setCookies` holds the individual `Set-Cookie` values as an array (masked like other sensitive headers in `kb log export` bundles).
+
+```bash
+kb request localhost:3000/api/login -X POST -d '{"user":"a"}'   # Set-Cookie: sid=… is shown above the body
+kb request localhost:3000/api/me -i                              # all response headers + individual Set-Cookie
+```
+
 ## Operation recording & shareable bundles
 
 The daemon **records operations by default** (commands, xhr/fetch/document traffic, console output). After a work session, one command produces a self-contained bundle that **someone without kb can read and reproduce**:

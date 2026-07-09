@@ -881,6 +881,7 @@ export class BrowserHost {
     totalChars?: number;
     offset?: number;
     truncated?: boolean;
+    setCookies?: string[];
   }> {
     const started = Date.now();
     // JSON に見えるボディで Content-Type 未指定なら application/json を補う(明示ヘッダ優先)
@@ -897,6 +898,12 @@ export class BrowserHost {
     const ms = Date.now() - started;
     const buf = await res.body().catch(() => Buffer.alloc(0)); // 204 等の空レスポンス
     const headers = res.headers();
+    // res.headers() は複数の Set-Cookie を 1 つに畳んでしまい個々の cookie を parse できない。
+    // headersArray() は各 Set-Cookie を別エントリで保持するので、そこから個別に取り出す。
+    const setCookies = res
+      .headersArray()
+      .filter((h) => h.name.toLowerCase() === 'set-cookie')
+      .map((h) => h.value);
     const contentType = headers['content-type'] ?? '';
     const base = {
       status: res.status(),
@@ -906,6 +913,8 @@ export class BrowserHost {
       contentType,
       ms,
       bytes: buf.length,
+      // 空配列のときは結果要約に載せない(ヘッダ系レスポンスのノイズを抑える)
+      ...(setCookies.length ? { setCookies } : {}),
     };
     res.dispose().catch(() => {});
     if (opts.savePath) {
