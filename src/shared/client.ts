@@ -17,13 +17,27 @@ import {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function isPidAlive(pid: number): boolean {
+/**
+ * pid の生存確認。EPERM(シグナル送信権限なし)は「生きているが触れない」なので生存扱いにする
+ * (これを死亡扱いすると、生きているデーモンへの二重起動や早すぎるツリーキルを招く)。
+ */
+export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException)?.code === 'EPERM';
   }
+}
+
+/** pid の消滅をポーリングで待つ。タイムアウト内に消えたら true、生き残っていたら false。 */
+export async function waitForPidDeath(pid: number, timeoutMs: number, intervalMs = 200): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (isPidAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await sleep(intervalMs);
+  }
+  return true;
 }
 
 export async function rpcRaw(info: DaemonInfo, cmd: string, args: Record<string, unknown> = {}): Promise<any> {

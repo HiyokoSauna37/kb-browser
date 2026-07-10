@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { killTree } from '../daemon/procscan';
+import { isPidAlive } from '../shared/client';
 
 /**
  * e2e スモークテスト用のデーモン起動ハーネス。
@@ -47,15 +48,6 @@ export function browserAvailable(): boolean {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException)?.code === 'EPERM';
-  }
-}
 
 /** プロセス異常終了でも孤児 Chromium を残さないための最終保険(process 'exit' は同期処理のみ可)。 */
 const spawnedPids = new Set<number>();

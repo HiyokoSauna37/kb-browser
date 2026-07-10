@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { PROFILES_DIR, readDiskBuildId, removeDaemonInfo } from '../../shared/paths';
-import { pingDaemon, releaseSpawnLock, rpcRaw, spawnDaemon, waitForDaemon } from '../../shared/client';
+import { pingDaemon, releaseSpawnLock, rpcRaw, spawnDaemon, waitForDaemon, waitForPidDeath } from '../../shared/client';
 import { findOwnedDaemons, killTree, listProcesses } from '../../daemon/procscan';
 import { splitExtensionsArg } from '../../shared/util';
 import { print, run } from '../output';
@@ -125,16 +125,7 @@ export function registerDaemonCommands(program: Command): void {
         // 消滅を待たずに spawn すると同じ profile の user-data-dir で ProcessSingleton 競合になる。
         await rpcRaw(info, 'daemon.stop').catch(() => {});
         removeDaemonInfo();
-        const aliveP = (pid: number) => {
-          try {
-            process.kill(pid, 0);
-            return true;
-          } catch {
-            return false;
-          }
-        };
-        for (let i = 0; i < 40 && aliveP(info.pid); i++) await new Promise((r) => setTimeout(r, 200)); // 最大 ~8 秒
-        if (aliveP(info.pid)) {
+        if (!(await waitForPidDeath(info.pid, 8_000))) {
           throw new Error(`旧デーモン (pid=${info.pid}) が終了しませんでした。kb daemon stop --all で回収してから start してください。`);
         }
         try {
@@ -191,8 +182,7 @@ export function registerDaemonCommands(program: Command): void {
             await rpcRaw(info, 'daemon.stop');
             // graceful 停止(ジャーナル最終書き込み・ブラウザ close)の完了を最大 5 秒待ってから
             // ツリーキルへ進む。即 /F すると後始末が中断されるため。
-            const aliveP = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-            for (let i = 0; i < 25 && aliveP(info.pid); i++) await new Promise((r) => setTimeout(r, 200));
+            await waitForPidDeath(info.pid, 5_000);
           } catch {
             /* 応答なしなら下のツリーキルで回収する */
           }
