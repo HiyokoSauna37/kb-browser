@@ -11,6 +11,8 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "test": "tsc && node --test \"dist/**/*.test.js\"",
+    "test:e2e": "tsc && node --test \"dist/e2e/**/*.e2e.js\"",
+    "test:all": "npm run test && npm run test:e2e",
     "kb": "node dist/cli.js"
   },
   "engines": {
