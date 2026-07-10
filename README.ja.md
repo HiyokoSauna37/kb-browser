@@ -70,7 +70,7 @@ kb daemon stop             # ブラウザごと終了
 | ナビゲーション | `kb back` / `kb forward` / `kb reload` / `kb scroll [--to <sel>/--bottom]` |
 | 操作 | `kb click` / `kb fill` / `kb select [--label]` / `kb check` / `kb uncheck` / `kb hover` / `kb upload <sel> <ローカルファイルパス...>` / `kb press <key>` / `kb eval <js> [--file f.js]`(await・複数行可、最後の式の値が返る)— 対象は CSS セレクタ、`--ref e12`(snapshot の ref)、`--frame <sel>`(iframe 内)で指定 |
 | ダイアログ | `kb dialog [show]` / `kb dialog accept [text]` / `kb dialog dismiss` / `kb dialog policy [hold\|accept\|dismiss]`(`alert`/`confirm`/`prompt` を保留してから応答。既定 `hold`) |
-| HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file]`(ページ非依存。Cookie・プロキシはブラウザと共有) |
+| HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file] [--no-follow \| --follow-verbose]`(ページ非依存。Cookie・プロキシはブラウザと共有) |
 | ログイン | `kb login [url] [--until <glob>] [--save <file>]`(手動サインイン → 状態はプロファイルに自動保存) |
 | Cookie / セッション | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump/restore` |
 | ダウンロード | `kb downloads [list/clear]`(`~/.kb/downloads/` に自動保存) |
@@ -211,6 +211,13 @@ kb request api.example.com/v2/me -H "Accept: application/vnd.api+json" -H "X-Api
 ```bash
 kb request localhost:3000/api/login -X POST -d '{"user":"a"}'   # Set-Cookie: sid=… が本文の前に表示される
 kb request localhost:3000/api/me -i                              # 全レスポンスヘッダ + 個別 Set-Cookie
+```
+
+リダイレクトは既定で追従します。`--no-follow` で 3xx の時点で止め、**`--follow-verbose`** で追従しつつ各ホップの status / `Location` / `Set-Cookie` を表示します(リダイレクト先の確認や、途中で撒かれる Cookie の分析に。メソッド処理はブラウザ準拠で 303 と 301/302 の POST は GET 化、307/308 は維持)。`--json` では中間ホップが `result.hops` に入ります。
+
+```bash
+kb request example.com/login --follow-verbose      # 302 → 301 → 200。各ホップの Set-Cookie も表示
+kb request example.com/old-path --no-follow         # 最終遷移先でなく 3xx 自体を表示
 ```
 
 ## 操作記録と共有バンドル

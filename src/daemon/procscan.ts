@@ -25,20 +25,31 @@ function norm(s: string): string {
 }
 
 /**
- * プロセス一覧から「この KB_HOME(= profilesDir)に属する kb デーモン」の pid を抽出する。
+ * プロセス一覧から「この KB_HOME に属する kb デーモン」の pid を抽出する。
  *
- * デーモン本体の argv には KB_HOME が現れない(profile 名しか渡らない)ため、profilesDir を
- * `--user-data-dir` に含む Chromium プロセスから祖先を辿ってデーモン本体を特定する。
- * 所有を確認できないデーモン(他 KB_HOME / まだ子を生成していない)は誤爆を避けて除外する。
- * selfPid(および呼び出し元自身)は対象外。純関数なのでユニットテスト可能。
+ * 2 経路で同定する:
+ *  (1) デーモン本体の argv に焼かれた `--home <KB_HOME>` マーカー(homeMarker)で直接一致させる。
+ *      子 Chromium の生死に依存しないため、Chromium が先に死んで node だけ残った孤児も掴める
+ *      (client.ts の spawnDaemon が付与。これがこのバージョンの主経路)。
+ *  (2) マーカーを持たない旧バージョン起動のデーモン向けの後方互換: profilesDir を `--user-data-dir`
+ *      に含む Chromium プロセスから祖先を辿ってデーモン本体を特定する(子が生きている場合のみ)。
+ *
+ * 所有を確認できないデーモン(他 KB_HOME / マーカーなし かつ 子を生成していない)は誤爆を避けて
+ * 除外する。selfPid(および呼び出し元自身)は対象外。純関数なのでユニットテスト可能。
  */
-export function findOwnedDaemons(procs: ProcInfo[], profilesDir: string, selfPid: number): number[] {
+export function findOwnedDaemons(procs: ProcInfo[], profilesDir: string, selfPid: number, homeMarker?: string): number[] {
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   const needle = norm(profilesDir);
   const isDaemon = (p: ProcInfo): boolean => p.pid !== selfPid && DAEMON_RE.test(p.cmd);
   const owned = new Set<number>();
 
-  // profilesDir を参照する Chromium(や子孫)から、祖先方向に最初のデーモンを探す。
+  // (1) --home <KB_HOME> マーカーでデーモンを直接同定する(子 Chromium の有無に依存しない)。
+  if (homeMarker) {
+    const home = norm(homeMarker);
+    for (const p of procs) if (isDaemon(p) && norm(p.cmd).includes(home)) owned.add(p.pid);
+  }
+
+  // (2) 後方互換: profilesDir を参照する Chromium(や子孫)から、祖先方向に最初のデーモンを探す。
   for (const p of procs) {
     if (!norm(p.cmd).includes(needle)) continue;
     let cur: ProcInfo | undefined = p;
@@ -52,8 +63,6 @@ export function findOwnedDaemons(procs: ProcInfo[], profilesDir: string, selfPid
       cur = byPid.get(cur.ppid);
     }
   }
-  // 稀に profilesDir がデーモン本体の argv に現れるケースの保険。
-  for (const p of procs) if (isDaemon(p) && norm(p.cmd).includes(needle)) owned.add(p.pid);
 
   return [...owned];
 }

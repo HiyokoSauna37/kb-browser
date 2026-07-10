@@ -29,3 +29,20 @@ export function headersWithSetCookie(headers: Record<string, string> | undefined
   const other = Object.entries(headers ?? {}).filter(([k]) => k.toLowerCase() !== 'set-cookie');
   return '\n' + other.map(([k, v]) => `${k}: ${v}`).join('\n') + setCookieLines(setCookies);
 }
+
+/**
+ * リダイレクトチェーンの各ホップを 1 行ずつ整形する(kb request --follow-verbose / MCP followVerbose 共通)。
+ * `HTTP 301 Moved Permanently  <url>  →  <location>` の形。付与された Set-Cookie はホップ配下にインデント表示。
+ * 型は httpClient への逆依存を避けるため構造型で受ける。
+ */
+export function redirectHopLines(
+  hops: Array<{ status: number; statusText: string; url: string; location?: string; setCookies?: string[] }>,
+): string {
+  return hops
+    .map((h) => {
+      let s = `HTTP ${h.status} ${h.statusText}  ${h.url}  →  ${h.location ?? '(Location なし)'}`;
+      if (h.setCookies?.length) s += h.setCookies.map((c) => `\n    set-cookie: ${c}`).join('');
+      return s;
+    })
+    .join('\n');
+}

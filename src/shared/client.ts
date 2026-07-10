@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   DAEMON_INFO_PATH,
   DAEMON_LOG_PATH,
+  KB_HOME,
   SPAWN_LOCK_PATH,
   ensureKbHome,
   readDaemonInfo,
@@ -175,7 +176,10 @@ export function spawnDaemon(
   };
   if (!acquireSpawnLock()) return null;
   const daemonJs = path.join(__dirname, '..', 'daemon', 'main.js');
-  const args = [daemonJs];
+  // --home はプロセス一覧からこの KB_HOME のデーモンを同定するための識別子(procscan.findOwnedDaemons)。
+  // 子 Chromium が先に死んで node だけ残った孤児でも stop --all で回収できるよう argv に焼く。
+  // パス解決自体は env KB_HOME が正なので、この値はデーモン側では消費しない(識別専用)。
+  const args = [daemonJs, '--home', KB_HOME];
   if (merged.headless) args.push('--headless');
   args.push('--profile', merged.profile);
   if (merged.channel) args.push('--channel', merged.channel);

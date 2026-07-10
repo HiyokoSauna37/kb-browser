@@ -70,3 +70,47 @@ test('findOwnedDaemons: kb 以外の node プロセスは無視する', () => {
   ];
   assert.deepEqual(findOwnedDaemons(procs, PROFILES, 999), []);
 });
+
+// --- --home マーカーによる直接同定(子 Chromium の生死に依存しない) ---
+const HOME = '/home/u/.kb';
+
+test('findOwnedDaemons: --home マーカー付きなら子 Chromium が無くても(node 単独孤児)所有と判定', () => {
+  // 子 Chromium が先に死んで node だけ残ったケース。従来は掴めなかった。
+  const procs: ProcInfo[] = [
+    { pid: 400, ppid: 1, cmd: 'node /app/dist/daemon/main.js --home /home/u/.kb --profile default' },
+  ];
+  assert.deepEqual(findOwnedDaemons(procs, PROFILES, 999, HOME), [400]);
+});
+
+test('findOwnedDaemons: 別 KB_HOME の --home マーカーを持つデーモンは所有しない', () => {
+  const procs: ProcInfo[] = [
+    { pid: 500, ppid: 1, cmd: 'node /app/dist/daemon/main.js --home /other/.kb --profile default' },
+  ];
+  assert.deepEqual(findOwnedDaemons(procs, PROFILES, 999, HOME), []);
+});
+
+test('findOwnedDaemons: --home マーカーがあっても selfPid は対象外', () => {
+  const procs: ProcInfo[] = [
+    { pid: 400, ppid: 1, cmd: 'node /app/dist/daemon/main.js --home /home/u/.kb' },
+  ];
+  assert.deepEqual(findOwnedDaemons(procs, PROFILES, 400, HOME), []);
+});
+
+test('findOwnedDaemons: マーカー経路と Chromium 経路で同じデーモンを二重計上しない', () => {
+  const procs: ProcInfo[] = [
+    { pid: 100, ppid: 1, cmd: 'node /app/dist/daemon/main.js --home /home/u/.kb' },
+    { pid: 101, ppid: 100, cmd: 'chrome --user-data-dir=/home/u/.kb/profiles/default' },
+  ];
+  assert.deepEqual(findOwnedDaemons(procs, PROFILES, 999, HOME), [100]);
+});
+
+test('findOwnedDaemons: マーカー付き孤児と旧式(子から辿る)デーモンを混在で両方回収', () => {
+  const procs: ProcInfo[] = [
+    // 新式: node 単独孤児(マーカーで同定)
+    { pid: 400, ppid: 1, cmd: 'node /app/dist/daemon/main.js --home /home/u/.kb' },
+    // 旧式: マーカー無しだが子 Chromium が生存
+    { pid: 300, ppid: 1, cmd: 'node /app/dist/daemon/main.js' },
+    { pid: 301, ppid: 300, cmd: 'chrome --user-data-dir=/home/u/.kb/profiles/p1' },
+  ];
+  assert.deepEqual(findOwnedDaemons(procs, PROFILES, 999, HOME).sort(), [300, 400]);
+});

@@ -364,6 +364,7 @@ export class Daemon {
           data: a.data,
           timeoutMs: a.timeoutMs,
           follow: a.follow,
+          verbose: a.verbose,
           savePath: a.savePath,
           maxChars: a.maxChars,
           offset: a.offset,

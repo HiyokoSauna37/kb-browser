@@ -13,7 +13,7 @@ import {
   WAIT_DEFAULT_SEC,
   WAIT_MAX_SEC,
 } from './shared/constants';
-import { headersWithSetCookie, setCookieLines, truncSpan } from './shared/format';
+import { headersWithSetCookie, redirectHopLines, setCookieLines, truncSpan } from './shared/format';
 import { loadProxyConfig, saveProxyConfig } from './shared/proxyStore';
 import { KB_VERSION } from './shared/version';
 
@@ -250,7 +250,7 @@ tool(
 
 tool(
   'kb_request',
-  'ページを開かずに HTTP リクエストを送る(ミニ REST クライアント)。Cookie とプロキシ設定はブラウザと共有され、Set-Cookie も反映される。レスポンスの Set-Cookie は常に表示し、全レスポンスヘッダは includeHeaders で表示する。',
+  'ページを開かずに HTTP リクエストを送る(ミニ REST クライアント)。Cookie とプロキシ設定はブラウザと共有され、Set-Cookie も反映される。レスポンスの Set-Cookie は常に表示し、全レスポンスヘッダは includeHeaders で表示する。followVerbose でリダイレクト各ホップの status/Location/Set-Cookie を表示する。',
   {
     url: z.string().describe('リクエスト先 URL(スキーム省略時は https)'),
     method: z.string().optional().describe('HTTP メソッド(既定 GET)'),
@@ -258,20 +258,25 @@ tool(
     data: z.string().optional().describe('リクエストボディ'),
     timeoutSec: z.number().optional().describe('タイムアウト秒(既定 30)'),
     includeHeaders: z.boolean().optional().describe('レスポンスの全ヘッダを含める(既定は Set-Cookie のみ表示)'),
+    followVerbose: z.boolean().optional().describe('リダイレクトを追いつつ各ホップの status / Location / Set-Cookie を表示する'),
     maxChars: z.number().int().optional().describe('本文の最大文字数 (0 = 無制限)'),
     offset: z.number().int().optional().describe('取得開始位置'),
   },
-  safe(async ({ url, method, headers, data, timeoutSec, includeHeaders, maxChars, offset }) => {
+  safe(async ({ url, method, headers, data, timeoutSec, includeHeaders, followVerbose, maxChars, offset }) => {
     const r = await rpc('request', {
       url,
       method,
       headers,
       data,
       timeoutMs: (timeoutSec ?? REQUEST_TIMEOUT_SEC) * 1000,
+      verbose: followVerbose,
       maxChars,
       offset,
     });
-    let head = `HTTP ${r.status} ${r.statusText} (${r.ms}ms, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''})`;
+    const hops = r.hops ?? [];
+    const chain = hops.length ? redirectHopLines(hops) + '\n' : '';
+    const finalUrl = hops.length ? `  ${r.url}` : '';
+    let head = `${chain}HTTP ${r.status} ${r.statusText}${finalUrl} (${r.ms}ms${hops.length ? ' total' : ''}, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''})`;
     const setCookies: string[] = r.setCookies ?? [];
     if (includeHeaders) {
       // set-cookie は個別行で出す(res.headers() の畳み込みでは parse できないため setCookies を使う)

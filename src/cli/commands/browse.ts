@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { Command } from 'commander';
 import { rpc } from '../../shared/client';
 import { REQUEST_TIMEOUT_SEC } from '../../shared/constants';
-import { headersWithSetCookie, setCookieLines } from '../../shared/format';
+import { headersWithSetCookie, redirectHopLines, setCookieLines } from '../../shared/format';
 import { parseHeaderArgs } from '../../shared/util';
 import { fmtTabs, intOpt, print, run, truncNote } from '../output';
 
@@ -159,6 +159,7 @@ export function registerBrowseCommands(program: Command): void {
     .option('-d, --data <body>', 'リクエストボディ')
     .option('--data-file <path>', 'ボディをファイルから読み込む')
     .option('--no-follow', 'リダイレクトを追わない')
+    .option('--follow-verbose', 'リダイレクトを追いつつ各ホップの status / Location / Set-Cookie を表示する')
     .option('--timeout <sec>', 'タイムアウト秒数', intOpt, REQUEST_TIMEOUT_SEC)
     .option('-o, --out <file>', 'レスポンス本文をファイルに保存する(バイナリ向け)')
     .option('-i, --include', 'レスポンスヘッダも表示する')
@@ -174,6 +175,7 @@ export function registerBrowseCommands(program: Command): void {
             data?: string;
             dataFile?: string;
             follow: boolean;
+            followVerbose?: boolean;
             timeout: number;
             out?: string;
             include?: boolean;
@@ -182,6 +184,7 @@ export function registerBrowseCommands(program: Command): void {
           },
         ) => {
           if (opts.data !== undefined && opts.dataFile) throw new Error('--data と --data-file は同時に指定できません');
+          if (opts.followVerbose && !opts.follow) throw new Error('--follow-verbose と --no-follow は同時に指定できません');
           const data = opts.dataFile ? fs.readFileSync(path.resolve(opts.dataFile), 'utf8') : opts.data;
           const headers = parseHeaderArgs(opts.header);
           const r = await rpc('request', {
@@ -191,13 +194,18 @@ export function registerBrowseCommands(program: Command): void {
             data,
             timeoutMs: opts.timeout * 1000,
             follow: opts.follow,
+            verbose: opts.followVerbose,
             savePath: opts.out ? path.resolve(opts.out) : undefined,
             maxChars: opts.maxChars,
             offset: opts.offset,
           });
           print(r, () => {
-            let out = `HTTP ${r.status} ${r.statusText} (${r.ms}ms, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''})`;
-            if (r.url !== url) out += `\n→ ${r.url}`;
+            // --follow-verbose: 中間ホップを先に並べ、最終レスポンス行に解決後 URL を添える。
+            const hops = r.hops ?? [];
+            const chain = hops.length ? redirectHopLines(hops) + '\n' : '';
+            const finalUrl = hops.length ? `  ${r.url}` : '';
+            let out = `${chain}HTTP ${r.status} ${r.statusText}${finalUrl} (${r.ms}ms${hops.length ? ' total' : ''}, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''})`;
+            if (!hops.length && r.url !== url) out += `\n→ ${r.url}`;
             const setCookies: string[] = r.setCookies ?? [];
             if (opts.include) {
               out += headersWithSetCookie(r.headers, setCookies);

@@ -141,6 +141,7 @@ export const rpcSchemas = {
     data: z.string().optional(),
     timeoutMs: z.number().optional(),
     follow: z.boolean().optional(),
+    verbose: z.boolean().optional(),
     savePath: z.string().optional(),
     ...paging,
   }),

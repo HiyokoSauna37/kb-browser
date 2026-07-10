@@ -70,7 +70,7 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 | Navigation | `kb back` / `kb forward` / `kb reload` / `kb scroll [--to <sel>/--bottom]` |
 | Interaction | `kb click` / `kb fill` / `kb select [--label]` / `kb check` / `kb uncheck` / `kb hover` / `kb upload <sel> <local file path...>` / `kb press <key>` / `kb eval <js> [--file f.js]` (`await` & multi-line OK; returns the last expression) — target via CSS selector, `--ref e12` (from snapshot), or `--frame <sel>` (inside iframe) |
 | Dialogs | `kb dialog [show]` / `kb dialog accept [text]` / `kb dialog dismiss` / `kb dialog policy [hold\|accept\|dismiss]` (hold `alert`/`confirm`/`prompt`, then respond; default `hold`) |
-| HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file]` (page-independent; shares cookies & proxy with the browser) |
+| HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file] [--no-follow \| --follow-verbose]` (page-independent; shares cookies & proxy with the browser) |
 | Login | `kb login [url] [--until <glob>] [--save <file>]` (manual sign-in → state auto-saved to the profile) |
 | Cookies / session | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump/restore` |
 | Downloads | `kb downloads [list/clear]` (auto-saved under `~/.kb/downloads/`) |
@@ -211,6 +211,13 @@ Response **`Set-Cookie` headers are shown by default, one per line** (multiple c
 ```bash
 kb request localhost:3000/api/login -X POST -d '{"user":"a"}'   # Set-Cookie: sid=… is shown above the body
 kb request localhost:3000/api/me -i                              # all response headers + individual Set-Cookie
+```
+
+Redirects are followed by default. Use `--no-follow` to stop at the 3xx, or **`--follow-verbose`** to follow while printing every hop's status / `Location` / `Set-Cookie` — useful for seeing where a chain lands and which cookies get set mid-redirect (method handling matches browsers: 303 and POST-on-301/302 become GET; 307/308 preserve). With `--json`, the intermediate hops are in `result.hops`.
+
+```bash
+kb request example.com/login --follow-verbose      # 302 → 301 → 200, each hop with its Set-Cookie
+kb request example.com/old-path --no-follow         # show the 3xx itself instead of the final target
 ```
 
 ## Operation recording & shareable bundles

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { PROFILES_DIR, readDiskBuildId, removeDaemonInfo } from '../../shared/paths';
+import { KB_HOME, PROFILES_DIR, readDiskBuildId, removeDaemonInfo } from '../../shared/paths';
 import { pingDaemon, releaseSpawnLock, rpcRaw, spawnDaemon, waitForDaemon, waitForPidDeath } from '../../shared/client';
 import { findOwnedDaemons, killTree, listProcesses } from '../../daemon/procscan';
 import { splitExtensionsArg } from '../../shared/util';
@@ -163,10 +163,11 @@ export function registerDaemonCommands(program: Command): void {
           return;
         }
 
-        // --all: プロセス一覧からこの KB_HOME(PROFILES_DIR)に属するデーモンを列挙する。
-        // 子 Chromium の --user-data-dir が profiles 配下のものだけを所有とみなし、他 KB_HOME や
-        // 自プロセスは誤爆しない(procscan.findOwnedDaemons)。
-        const owned = findOwnedDaemons(listProcesses(), PROFILES_DIR, process.pid);
+        // --all: プロセス一覧からこの KB_HOME に属するデーモンを列挙する。デーモン argv の
+        // --home <KB_HOME> マーカーで直接同定し(子 Chromium が死んで node だけ残った孤児も掴める)、
+        // マーカーのない旧デーモンは子 Chromium の --user-data-dir(PROFILES_DIR 配下)から辿る。
+        // 他 KB_HOME や自プロセスは誤爆しない(procscan.findOwnedDaemons)。
+        const owned = findOwnedDaemons(listProcesses(), PROFILES_DIR, process.pid, KB_HOME);
 
         if (opts.dryRun) {
           print({ dryRun: true, owned }, () =>
