@@ -17,7 +17,12 @@ export function registerBrowseCommands(program: Command): void {
     .option('--wait <state>', '待機条件: dcl | load | idle (SPA は idle 推奨)', 'dcl')
     .action(
       run(async (url: string, opts: { new?: boolean; tab?: number; wait: string }) => {
-        const waitUntil = { dcl: 'domcontentloaded', load: 'load', idle: 'networkidle' }[opts.wait];
+        const waitMap: Record<string, 'domcontentloaded' | 'load' | 'networkidle'> = {
+          dcl: 'domcontentloaded',
+          load: 'load',
+          idle: 'networkidle',
+        };
+        const waitUntil = waitMap[opts.wait];
         if (!waitUntil) throw new Error('--wait は dcl | load | idle を指定してください');
         const result = await rpc('open', { url, new: opts.new, tab: opts.tab, waitUntil });
         print(result, (r) => `tab ${r.tab}: ${r.url}${r.title ? ` "${r.title}"` : ''}`);

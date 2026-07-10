@@ -12,6 +12,7 @@ import {
   removeDaemonInfo,
   type DaemonInfo,
 } from './paths';
+import type { RpcArgs, RpcCommand } from './rpc';
 
 /** デーモンへの RPC クライアント。CLI と MCP サーバの両方から使う。 */
 
@@ -233,7 +234,15 @@ export async function waitForDaemon(child?: ChildProcess | null): Promise<Daemon
   );
 }
 
-/** デーモンに RPC を送る。未起動なら自動起動して待つ(内容を stderr に通知する)。 */
+/**
+ * デーモンに RPC を送る。未起動なら自動起動して待つ(内容を stderr に通知する)。
+ *
+ * リテラルのコマンド名で呼ぶと引数が `RpcArgs<C>` で型検査される(CLI/MCP の呼び出しミスを
+ * コンパイルエラーにする)。cmd が動的な文字列(replay や follow のループ)なら緩い
+ * オーバーロードにフォールバックする。
+ */
+export async function rpc<C extends RpcCommand>(cmd: C, args?: RpcArgs<C>): Promise<any>;
+export async function rpc(cmd: string, args?: Record<string, unknown>): Promise<any>;
 export async function rpc(cmd: string, args: Record<string, unknown> = {}): Promise<any> {
   let info = await pingDaemon();
   if (!info) {

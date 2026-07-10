@@ -119,7 +119,7 @@ export class NetMonitor {
     return rule;
   }
 
-  async addMock(context: BrowserContext, pattern: string, status: number, contentType: string, body: string): Promise<RouteRule> {
+  async addMock(context: BrowserContext, pattern: string, status?: number, contentType?: string, body?: string): Promise<RouteRule> {
     const handler = (route: Route) => void route.fulfill({ status, contentType, body });
     await context.route(pattern, handler);
     const rule = { id: this.nextRouteId++, pattern, action: 'mock' as const, status, contentType };

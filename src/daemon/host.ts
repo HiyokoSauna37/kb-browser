@@ -816,7 +816,7 @@ export class BrowserHost {
     return this.net.addBlock(this.context, pattern);
   }
 
-  async addMock(pattern: string, status: number, contentType: string, body: string): Promise<RouteRule> {
+  async addMock(pattern: string, status?: number, contentType?: string, body?: string): Promise<RouteRule> {
     return this.net.addMock(this.context, pattern, status, contentType, body);
   }
 

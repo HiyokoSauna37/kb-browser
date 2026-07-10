@@ -1,12 +1,14 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { BrowserHost } from './host';
+import { z } from 'zod';
+import { BrowserHost, type DialogPolicy } from './host';
 import { IdleReaper, resolveIdleTimeoutMs } from './idle';
 import { Journal, pruneLogSessions } from './journal';
 import { RelayProxy } from './relay';
 import { loadProxyConfig, resolveProfile } from '../shared/proxyStore';
 import { clipStr, summarizeArgs } from '../shared/oplog';
+import { isRpcCommand, rpcSchemas, type RpcArgs, type RpcCommand } from '../shared/rpc';
 import { splitExtensionsArg } from '../shared/util';
 import {
   DAEMON_LOG_PATH,
@@ -180,179 +182,151 @@ async function main(): Promise<void> {
   });
 
   /** click / fill 等の操作対象 (selector / ref / frame / tab) を組み立てる。 */
-  const target = (args: Record<string, any>) => ({
-    selector: args.selector,
-    ref: args.ref,
-    frame: args.frame,
-    tab: args.tab,
+  const target = (a: { selector?: string; ref?: string; frame?: string; tab?: number }) => ({
+    selector: a.selector,
+    ref: a.ref,
+    frame: a.frame,
+    tab: a.tab,
   });
 
+  /**
+   * コマンド名 → ハンドラの対応表。mapped type `{ [C in RpcCommand]: ... }` により
+   * 「全コマンドにハンドラがある」ことがコンパイル時に強制される(漏れ・余剰はエラー)。
+   * 各ハンドラの引数は shared/rpc.ts のスキーマから導いた `RpcArgs<C>` で型付けされる。
+   */
+  type RpcHandler<C extends RpcCommand> = (args: RpcArgs<C>) => unknown | Promise<unknown>;
+  const handlers: { [C in RpcCommand]: RpcHandler<C> } = {
+    'daemon.status': () => ({ ...host.status(), proxy: relay.status().active, idleTimeoutSec }),
+    'daemon.stop': () => ({ stopping: true }),
+    'proxy.use': () => {
+      applyProxyConfig();
+      log(`proxy config reloaded (active=${relay.status().active})`);
+      return relay.status();
+    },
+    'proxy.reload': () => {
+      applyProxyConfig();
+      log(`proxy config reloaded (active=${relay.status().active})`);
+      return relay.status();
+    },
+    'proxy.status': () => relay.status(),
+    'proxy.test': async (a) => {
+      const cfg = loadProxyConfig();
+      const name = a.name ?? relay.status().active;
+      const result = await relay.testUpstream(resolveProfile(cfg, name));
+      return { profile: name, ...result };
+    },
+    'open': (a) => host.open(a.url, !!a.new, a.tab, a.waitUntil),
+    'tabs.list': () => host.listTabs(),
+    'tabs.close': (a) => host.closeTab(a.tab),
+    'tabs.activate': (a) => host.activateTab(a.tab),
+    'screenshot': (a) =>
+      host.screenshot(
+        a.path,
+        { full: !!a.full, selector: a.selector, ref: a.ref, frame: a.frame, timeoutMs: a.timeoutMs },
+        a.tab,
+      ),
+    'text': (a) => host.text(a.tab, { maxChars: a.maxChars, offset: a.offset }),
+    'html': (a) => host.html(a.tab, { maxChars: a.maxChars, offset: a.offset }),
+    'snapshot': (a) => host.snapshot(a.tab, { maxChars: a.maxChars, offset: a.offset }),
+    'eval': (a) => host.eval(a.expression, a.tab, { maxChars: a.maxChars, offset: a.offset }),
+    'click': (a) => host.click(target(a)),
+    'fill': (a) => host.fill(target(a), a.value),
+    'press': (a) => host.press(a.key, a.tab),
+    'hover': (a) => host.hover(target(a)),
+    'check': (a) => host.setChecked(target(a), a.checked !== false),
+    'select': (a) => host.select(target(a), a.values ?? [], !!a.byLabel),
+    'upload': (a) => host.upload(target(a), a.files ?? []),
+    'scroll': (a) => host.scroll({ by: a.by, to: a.to, top: a.top, bottom: a.bottom }, a.tab),
+    'back': (a) => host.goBack(a.tab),
+    'forward': (a) => host.goForward(a.tab),
+    'reload': (a) => host.reload(a.tab),
+    'pdf': (a) => host.pdf(a.path, a.tab),
+    'downloads.list': () => host.listDownloads(),
+    'downloads.clear': () => host.clearDownloads(),
+    'cookies.list': (a) => host.cookies(a.domain),
+    'cookies.set': (a) => host.setCookie(a.cookie),
+    'cookies.rm': (a) => host.removeCookie(a.name, a.domain),
+    'cookies.clear': () => host.clearCookies(),
+    'cookies.import': (a) => host.importCookies(a.cookies ?? []),
+    'storage.dump': () => host.storageDump(),
+    'storage.restore': (a) => host.storageRestore(a.state ?? {}),
+    'net.log': (a) => host.netLogQuery(a),
+    'net.body': (a) => host.netBody(a.seq, { maxChars: a.maxChars, offset: a.offset }),
+    'net.headers': (a) => host.netHeadersQuery(a.seq),
+    'log.start': (a) => journal.start(a.name, sessionMeta(), { shots: !!a.shots }),
+    'log.stop': () => journal.stop(),
+    'log.status': () => journal.status(),
+    'request': (a) =>
+      host.httpRequest({
+        url: a.url,
+        method: a.method,
+        headers: a.headers,
+        data: a.data,
+        timeoutMs: a.timeoutMs,
+        follow: a.follow,
+        savePath: a.savePath,
+        maxChars: a.maxChars,
+        offset: a.offset,
+      }),
+    'net.clear': () => host.netClear(),
+    'net.block': (a) => host.addBlock(a.pattern),
+    'net.mock': (a) => host.addMock(a.pattern, a.status, a.contentType, a.body),
+    'net.rules': () => host.listRoutes(),
+    'net.unroute': (a) => (a.all ? host.removeAllRoutes() : host.removeRoute(a.id!)),
+    'net.har.start': () => host.harStart(),
+    'net.har.stop': () => host.harStop(),
+    'net.har.status': () => host.harStatus(),
+    'console.log': (a) => host.consoleQuery(a),
+    'console.clear': () => host.consoleClear(),
+    'dom.query': (a) => host.domQuery(a.selector, a, a.tab),
+    'dialog.info': (a) => host.dialogInfo(a.tab),
+    'dialog.respond': (a) => host.dialogRespond(!!a.accept, a.text, a.tab),
+    'dialog.policy': (a) => host.setDialogPolicy(a.policy as DialogPolicy | undefined),
+    'mode.set': async (a) => {
+      const result = await host.setMode(!!a.headless);
+      writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec, extensions, ignoreHttpsErrors });
+      log(`mode switched: headless=${result.headless} (restored ${result.restoredTabs} tabs)`);
+      return result;
+    },
+    'profile.set': async (a) => {
+      const result = await host.setProfile(a.name);
+      writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec, extensions, ignoreHttpsErrors });
+      log(`profile switched: ${result.profile} (restored ${result.restoredTabs} tabs)`);
+      return result;
+    },
+    'auth.set': async (a) => {
+      const result = await host.setAuth(a.credentials ?? null);
+      log(`http credentials ${result.auth ? 'set' : 'cleared'}`);
+      return result;
+    },
+    'wait': (a) =>
+      host.waitFor(
+        { url: a.url, selector: a.selector, selectorGone: a.selectorGone, idle: !!a.idle, any: !!a.any, timeoutMs: a.timeoutMs ?? 120_000 },
+        a.tab,
+      ),
+    'emulate': (a) => host.emulate(a, a.tab),
+    'emulate.geo': (a) => host.setGeolocation(a.latitude, a.longitude),
+    'emulate.net': (a) => host.emulateNetwork(a.preset, a.tab),
+  };
+
+  /**
+   * RPC を検証してハンドラへ振り分ける。受信境界でスキーマ検証(非 strict なので未知キーは
+   * 落とす)し、検証済みの引数をハンドラに渡す。コマンド名とその引数は実行時インデックスなので
+   * 型システムでは相関できず、境界の 1 箇所だけ unknown に消去する(検証済みのため安全)。
+   */
   async function dispatch({ cmd, args }: RpcRequest): Promise<unknown> {
-    switch (cmd) {
-      case 'daemon.status':
-        return { ...host.status(), proxy: relay.status().active, idleTimeoutSec };
-      case 'daemon.stop':
-        return { stopping: true };
-      case 'proxy.use':
-      case 'proxy.reload':
-        applyProxyConfig();
-        log(`proxy config reloaded (active=${relay.status().active})`);
-        return relay.status();
-      case 'proxy.status':
-        return relay.status();
-      case 'proxy.test': {
-        const cfg = loadProxyConfig();
-        const name = args.name ?? relay.status().active;
-        const result = await relay.testUpstream(resolveProfile(cfg, name));
-        return { profile: name, ...result };
+    if (!isRpcCommand(cmd)) throw new Error(`unknown command: ${cmd}`);
+    let parsed: unknown;
+    try {
+      parsed = rpcSchemas[cmd].parse(args ?? {});
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        const detail = err.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+        throw new Error(`引数が不正です (${cmd}): ${detail}`);
       }
-      case 'open':
-        return host.open(args.url, !!args.new, args.tab, args.waitUntil);
-      case 'tabs.list':
-        return host.listTabs();
-      case 'tabs.close':
-        return host.closeTab(args.tab);
-      case 'tabs.activate':
-        return host.activateTab(args.tab);
-      case 'screenshot':
-        return host.screenshot(
-          args.path,
-          { full: !!args.full, selector: args.selector, ref: args.ref, frame: args.frame, timeoutMs: args.timeoutMs },
-          args.tab,
-        );
-      case 'text':
-        return host.text(args.tab, { maxChars: args.maxChars, offset: args.offset });
-      case 'html':
-        return host.html(args.tab, { maxChars: args.maxChars, offset: args.offset });
-      case 'snapshot':
-        return host.snapshot(args.tab, { maxChars: args.maxChars, offset: args.offset });
-      case 'eval':
-        return host.eval(args.expression, args.tab, { maxChars: args.maxChars, offset: args.offset });
-      case 'click':
-        return host.click(target(args));
-      case 'fill':
-        return host.fill(target(args), args.value);
-      case 'press':
-        return host.press(args.key, args.tab);
-      case 'hover':
-        return host.hover(target(args));
-      case 'check':
-        return host.setChecked(target(args), args.checked !== false);
-      case 'select':
-        return host.select(target(args), args.values ?? [], !!args.byLabel);
-      case 'upload':
-        return host.upload(target(args), args.files ?? []);
-      case 'scroll':
-        return host.scroll({ by: args.by, to: args.to, top: args.top, bottom: args.bottom }, args.tab);
-      case 'back':
-        return host.goBack(args.tab);
-      case 'forward':
-        return host.goForward(args.tab);
-      case 'reload':
-        return host.reload(args.tab);
-      case 'pdf':
-        return host.pdf(args.path, args.tab);
-      case 'downloads.list':
-        return host.listDownloads();
-      case 'downloads.clear':
-        return host.clearDownloads();
-      case 'cookies.list':
-        return host.cookies(args.domain);
-      case 'cookies.set':
-        return host.setCookie(args.cookie);
-      case 'cookies.rm':
-        return host.removeCookie(args.name, args.domain);
-      case 'cookies.clear':
-        return host.clearCookies();
-      case 'cookies.import':
-        return host.importCookies(args.cookies ?? []);
-      case 'storage.dump':
-        return host.storageDump();
-      case 'storage.restore':
-        return host.storageRestore(args.state ?? {});
-      case 'net.log':
-        return host.netLogQuery(args);
-      case 'net.body':
-        return host.netBody(args.seq, { maxChars: args.maxChars, offset: args.offset });
-      case 'net.headers':
-        return host.netHeadersQuery(args.seq);
-      case 'log.start':
-        return journal.start(args.name, sessionMeta(), { shots: !!args.shots });
-      case 'log.stop':
-        return journal.stop();
-      case 'log.status':
-        return journal.status();
-      case 'request':
-        return host.httpRequest({
-          url: args.url,
-          method: args.method,
-          headers: args.headers,
-          data: args.data,
-          timeoutMs: args.timeoutMs,
-          follow: args.follow,
-          savePath: args.savePath,
-          maxChars: args.maxChars,
-          offset: args.offset,
-        });
-      case 'net.clear':
-        return host.netClear();
-      case 'net.block':
-        return host.addBlock(args.pattern);
-      case 'net.mock':
-        return host.addMock(args.pattern, args.status, args.contentType, args.body);
-      case 'net.rules':
-        return host.listRoutes();
-      case 'net.unroute':
-        return args.all ? host.removeAllRoutes() : host.removeRoute(args.id);
-      case 'net.har.start':
-        return host.harStart();
-      case 'net.har.stop':
-        return host.harStop();
-      case 'net.har.status':
-        return host.harStatus();
-      case 'console.log':
-        return host.consoleQuery(args);
-      case 'console.clear':
-        return host.consoleClear();
-      case 'dom.query':
-        return host.domQuery(args.selector, args, args.tab);
-      case 'dialog.info':
-        return host.dialogInfo(args.tab);
-      case 'dialog.respond':
-        return host.dialogRespond(!!args.accept, args.text, args.tab);
-      case 'dialog.policy':
-        return host.setDialogPolicy(args.policy);
-      case 'mode.set': {
-        const result = await host.setMode(!!args.headless);
-        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec, extensions, ignoreHttpsErrors });
-        log(`mode switched: headless=${result.headless} (restored ${result.restoredTabs} tabs)`);
-        return result;
-      }
-      case 'profile.set': {
-        const result = await host.setProfile(args.name);
-        writeLastRun({ headless: host.headless, profile: host.profile, channel, userAgent, stealth, idleTimeoutSec: idleLastRunSec, extensions, ignoreHttpsErrors });
-        log(`profile switched: ${result.profile} (restored ${result.restoredTabs} tabs)`);
-        return result;
-      }
-      case 'auth.set': {
-        const result = await host.setAuth(args.credentials ?? null);
-        log(`http credentials ${result.auth ? 'set' : 'cleared'}`);
-        return result;
-      }
-      case 'wait':
-        return host.waitFor(
-          { url: args.url, selector: args.selector, selectorGone: args.selectorGone, idle: !!args.idle, any: !!args.any, timeoutMs: args.timeoutMs ?? 120_000 },
-          args.tab,
-        );
-      case 'emulate':
-        return host.emulate(args, args.tab);
-      case 'emulate.geo':
-        return host.setGeolocation(args.latitude, args.longitude);
-      case 'emulate.net':
-        return host.emulateNetwork(args.preset, args.tab);
-      default:
-        throw new Error(`unknown command: ${cmd}`);
+      throw err;
     }
+    return (handlers[cmd] as (a: unknown) => unknown)(parsed);
   }
 
   /** proxies.json を読み直し、active と振り分けルールを relay に反映する。 */
