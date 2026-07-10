@@ -1,16 +1,16 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { chromium, type Browser, type BrowserContext, type Dialog, type Page } from 'playwright';
-import { REQUEST_TIMEOUT_SEC } from '../shared/constants';
-import { DOWNLOADS_DIR, PROFILES_DIR } from '../shared/paths';
-import { clip, inferJsonContentType, LogBuffer, normalizeUrl, prepareEval } from '../shared/util';
+import { type Browser, type BrowserContext, type Page } from 'playwright';
+import { clip, LogBuffer, normalizeUrl, prepareEval } from '../shared/util';
 import { Emulator } from './emulation';
+import { DialogManager } from './host/dialogs';
+import { DownloadManager } from './host/downloads';
+import { httpRequest, type HttpRequestOptions, type HttpResult } from './host/httpClient';
+import { attachOverCdp, launchOwned } from './host/launcher';
+import { TabRegistry } from './host/tabs';
 import { NetMonitor } from './netMonitor';
 import { TargetResolver } from './targets';
 import {
   LOG_CAP,
   TEXT_CAP,
-  TEXT_CONTENT_RE,
   type ActionResult,
   type ConsoleEntry,
   type DialogInfo,
@@ -30,8 +30,6 @@ export type { ActionResult, ConsoleEntry, DialogInfo, DialogPolicy, DownloadInfo
 const DOM_HTML_CAP = 2_000;
 /** 操作系のデフォルトタイムアウト。 */
 const ACTION_TIMEOUT = 10_000;
-/** downloads 配列の保持上限(古いものから evict。ファイル実体は消さない)。 */
-const DOWNLOADS_CAP = 1_000;
 
 /**
  * Chromium(persistent context)を保持し、タブを ID で管理するブラウザホスト。
@@ -45,28 +43,17 @@ export class BrowserHost {
   private browser: Browser | null = null;
   /** 既存ブラウザへのアタッチモードか。再起動を伴う操作 (mode/profile/auth) は使えない。 */
   attached = false;
-  private tabs = new Map<number, Page>();
-  private nextTabId = 1;
-  private activeTabId: number | null = null;
+  /** タブの ID 管理(Map + 採番 + アクティブタブ)。イベント配線は registerTab が持つ。 */
+  private tabs = new TabRegistry();
 
   private net = new NetMonitor();
   private emulator = new Emulator();
   private targets = new TargetResolver();
   private consoleLog = new LogBuffer<ConsoleEntry>(LOG_CAP);
-  private downloads: DownloadInfo[] = [];
-  private nextDownloadId = 1;
+  private downloads = new DownloadManager();
 
-  /**
-   * JS ダイアログの応答ポリシー。既定 hold: リスナーなしの Playwright はダイアログを
-   * 表示前に自動 dismiss してしまい(confirm は常に false)、ユーザーには「ボタンが
-   * 反応しない」ように見える。hold は保留してネイティブ表示を残し、ウィンドウ上または
-   * kb dialog accept / dismiss での応答を待つ。
-   */
-  private dialogPolicy: DialogPolicy = 'hold';
-  /** タブ毎の応答待ちダイアログ。閉鎖は CDP の Page.javascriptDialogClosed で検知して消す。 */
-  private pendingDialogs = new Map<number, { dialog: Dialog; info: DialogInfo }>();
-  /** 操作中にダイアログが開いたことを actOrDialog へ知らせるワンショット通知。 */
-  private dialogWaiters = new Map<number, Set<(info: DialogInfo) => void>>();
+  /** JS ダイアログ (alert/confirm/prompt) の保留・応答。記録は logDialog 経由で consoleLog/journal へ。 */
+  private dialogs = new DialogManager((tab, text) => this.logDialog(tab, text));
 
   private opts!: HostOptions;
   /** mode/profile/auth 切替による再起動中は context 'close' でのデーモン終了を抑止する。 */
@@ -108,10 +95,17 @@ export class BrowserHost {
     this.headless = opts.headless;
     this.profile = opts.profile;
 
-    if (opts.cdpUrl) {
-      await this.attachOverCdp(opts.cdpUrl);
-    } else {
-      await this.launchOwned(opts);
+    const result = opts.cdpUrl ? await attachOverCdp(opts.cdpUrl) : await launchOwned(opts);
+    this.context = result.context;
+    this.browser = result.browser;
+    this.attached = result.attached;
+    this.channel = result.channel;
+
+    // アタッチ時: ユーザーがブラウザを閉じた/接続が切れたらデーモンも終了する
+    if (this.attached && this.browser) {
+      this.browser.on('disconnected', () => {
+        if (!this.restarting) this.onClosed();
+      });
     }
 
     for (const page of this.context.pages()) this.registerTab(page);
@@ -122,99 +116,6 @@ export class BrowserHost {
 
     // block / mock ルールは context 単位なので再起動時に引き継ぐ
     await this.net.reapplyRoutes(this.context);
-  }
-
-  /** 自前でブラウザを起動する(通常モード)。channel 明示指定時はフォールバックしない。 */
-  private async launchOwned(opts: HostOptions): Promise<void> {
-    const userDataDir = path.join(PROFILES_DIR, opts.profile);
-    const hasExt = opts.extensions != null;
-    // 拡張機能ロード時、「同梱 Chromium」は undefined でなく明示 channel 'chromium' として渡す。
-    // undefined + headless だと Playwright は旧 headless(headless shell)を選び拡張が一切
-    // ロードされないため(channel 'chromium' は同一バイナリで新 headless を使う)。
-    const bundled = hasExt ? 'chromium' : undefined;
-    const candidates: (string | undefined)[] = opts.channel
-      ? [opts.channel === 'chromium' ? bundled : opts.channel]
-      : opts.extensions?.length
-        ? // 未パック拡張の --load-extension は Chrome 137+ の stable では無視される(サイドロード
-          // マルウェア対策で削除)ため、自動選択では chrome/msedge を飛ばして同梱 Chromium を使う。
-          [bundled]
-        : ['chrome', 'msedge', bundled];
-    const errors: string[] = [];
-    let launched = false;
-    for (const channel of candidates) {
-      try {
-        this.context = await chromium.launchPersistentContext(userDataDir, {
-          headless: opts.headless,
-          channel,
-          viewport: null,
-          proxy: opts.proxy,
-          httpCredentials: opts.httpCredentials,
-          userAgent: opts.userAgent,
-          // HTTPS 証明書エラーを無視する(自己署名 / 未信頼 CA の MITM プロキシ向け escape hatch)。
-          // context.request(kb request)も context の設定を継承するため同じく無視される。
-          ignoreHTTPSErrors: opts.ignoreHttpsErrors,
-          // ステルス: navigator.webdriver を実 Chrome 同様に消す(JS で defineProperty するより
-          // フラグで生やさない方が痕跡が残らない)。計測上、これだけで chrome チャネルの
-          // JS レベルの自動化シグナルはほぼ実 Chrome と一致する。
-          args: [
-            ...(opts.stealth ? ['--disable-blink-features=AutomationControlled'] : []),
-            ...(opts.extensions?.length ? [`--load-extension=${opts.extensions.join(',')}`] : []),
-            // OS ストア非経由の CA 信頼: この SPKI の証明書だけエラーを許可する(全無検証ではない)
-            ...(opts.ignoreCertErrorsSpkiList?.length
-              ? [`--ignore-certificate-errors-spki-list=${opts.ignoreCertErrorsSpkiList.join(',')}`]
-              : []),
-          ],
-          // 拡張機能有効時は Playwright 既定の --disable-extensions を外す。これで
-          // プロファイルにインストール済みの拡張(ストア由来)もロードされる。
-          ignoreDefaultArgs: hasExt ? ['--disable-extensions'] : undefined,
-        });
-        this.channel = channel ?? 'bundled chromium';
-        launched = true;
-        break;
-      } catch (err) {
-        const firstLine = String(err instanceof Error ? err.message : err).split('\n')[0];
-        errors.push(`${channel ?? 'bundled chromium'}: ${firstLine}`);
-      }
-    }
-    if (!launched) {
-      const detail = errors.map((e) => `  - ${e}`).join('\n');
-      const hint = errors.some((e) => /ProcessSingleton|already in use|SingletonLock/i.test(e))
-        ? `プロファイル "${opts.profile}" が別の Chromium プロセスに使用されています。既存の kb デーモンや孤児プロセスを終了してください。`
-        : 'Chrome/Edge が見つからない場合は "npx playwright install chromium" を実行してください。';
-      throw new Error(`ブラウザを起動できません。${hint}\n候補ごとの失敗理由:\n${detail}`);
-    }
-  }
-
-  /**
-   * 起動済みブラウザへ connectOverCDP でアタッチする。対象は
-   * `--remote-debugging-port` 付きで起動した Chrome / Edge / Chromium。
-   * proxy / UA / Basic 認証などの起動時オプションは適用できない。
-   */
-  private async attachOverCdp(cdpUrl: string): Promise<void> {
-    let browser: Browser;
-    try {
-      browser = await chromium.connectOverCDP(cdpUrl, { timeout: 15_000 });
-    } catch (err) {
-      throw new Error(
-        `CDP エンドポイント ${cdpUrl} に接続できません。対象ブラウザを --remote-debugging-port 付きで起動してください` +
-          `(例: chrome --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\\kb-attach")。` +
-          `Chrome 136 以降は普段使いの既定プロファイルではリモートデバッグが無効化されているため、専用の --user-data-dir が必要です。\n` +
-          `(${String(err instanceof Error ? err.message : err).split('\n')[0]})`,
-      );
-    }
-    const contexts = browser.contexts();
-    if (!contexts.length) {
-      await browser.close().catch(() => {});
-      throw new Error('アタッチ先にブラウザコンテキストが見つかりません(ウィンドウが 1 つも開いていない可能性があります)');
-    }
-    this.browser = browser;
-    this.attached = true;
-    this.context = contexts[0];
-    this.channel = `cdp:${cdpUrl}`;
-    // ユーザーがブラウザを閉じた/接続が切れたらデーモンも終了する
-    browser.on('disconnected', () => {
-      if (!this.restarting) this.onClosed();
-    });
   }
 
   /** アタッチモードでは使えない操作のガード。 */
@@ -232,14 +133,13 @@ export class BrowserHost {
    * profile(Cookie 等)は永続化されており、開いていたタブの URL も復元する。
    */
   private async restart(patch: Partial<HostOptions>): Promise<{ restoredTabs: number }> {
-    const urls = [...this.tabs.values()].map((p) => p.url()).filter((u) => u && !u.startsWith('about:'));
+    const urls = this.tabs.pages().map((p) => p.url()).filter((u) => u && !u.startsWith('about:'));
     this.restarting = true;
     try {
       await this.context.close();
-      this.tabs.clear();
+      this.tabs.clear(); // Map を空にしアクティブも解除する
       this.emulator.clear();
       this.targets.clear();
-      this.activeTabId = null;
       this.opts = { ...this.opts, ...patch };
       await this.launch(this.opts);
       let restored = 0;
@@ -257,10 +157,10 @@ export class BrowserHost {
       }
       // 起動時に開く初期タブ (about:blank) はタブを復元できた場合は不要なので閉じる
       if (restored > 0) {
-        for (const [, page] of [...this.tabs]) {
+        for (const [, page] of this.tabs.entries()) {
           if (page.url() === 'about:blank' || page.url() === '') await page.close().catch(() => {});
         }
-        if (lastId != null && this.tabs.has(lastId)) this.activeTabId = lastId;
+        if (lastId != null && this.tabs.has(lastId)) this.tabs.active = lastId;
       }
       return { restoredTabs: restored };
     } finally {
@@ -307,44 +207,19 @@ export class BrowserHost {
   }
 
   private registerTab(page: Page): number {
-    for (const [id, p] of this.tabs) if (p === page) return id;
-    const id = this.nextTabId++;
-    this.tabs.set(id, page);
-    // ポップアップ等がアクティブタブを奪わないよう、未設定のときだけアクティブにする
-    // (明示的な open / activate は呼び出し側で activeTabId を設定する)
-    if (this.activeTabId == null) this.activeTabId = id;
+    const existing = this.tabs.find(page);
+    if (existing != null) return existing;
+    const id = this.tabs.add(page);
     page.on('close', () => {
-      this.tabs.delete(id);
+      this.tabs.remove(id);
       this.emulator.dropTab(id);
       this.targets.dropTab(id);
-      this.pendingDialogs.delete(id);
-      this.dialogWaiters.delete(id);
-      if (this.activeTabId === id) {
-        const remaining = [...this.tabs.keys()];
-        this.activeTabId = remaining.length ? remaining[remaining.length - 1] : null;
-      }
+      this.dialogs.dropTab(id);
     });
 
-    page.on('dialog', (dialog) => {
-      const info: DialogInfo = {
-        tab: id,
-        type: dialog.type(),
-        message: dialog.message().slice(0, 500),
-        ...(dialog.type() === 'prompt' ? { defaultValue: dialog.defaultValue() } : {}),
-        ts: new Date().toISOString(),
-      };
-      if (this.dialogPolicy === 'hold') {
-        this.pendingDialogs.set(id, { dialog, info });
-        this.logDialog(id, `${info.type}「${info.message}」が開き、応答待ちです (kb dialog accept / dismiss)`);
-        for (const notify of this.dialogWaiters.get(id) ?? []) notify(info);
-      } else {
-        // 応答済みダイアログに accept/dismiss すると throw するため握りつぶす(閉鎖は CDP 側で記録される)
-        void (this.dialogPolicy === 'accept' ? dialog.accept() : dialog.dismiss()).catch(() => {});
-        this.logDialog(id, `${info.type}「${info.message}」に policy=${this.dialogPolicy} で自動応答しました`);
-      }
-    });
+    page.on('dialog', (dialog) => this.dialogs.handle(dialog, id));
     // ユーザーがウィンドウ上で直接応答した場合も含め、ダイアログの閉鎖を検知して保留を解除する
-    void this.watchDialogClose(page, id);
+    void this.dialogs.watchClose(page, id);
 
     this.net.watchPage(page, id);
     // ページのネットワーク活動を idle reaper へ通知する(headed でユーザーが直接操作 → ナビ →
@@ -361,88 +236,25 @@ export class BrowserHost {
       this.onJournalConsole({ kind: 'pageerror', text: err.message, tab: id });
       this.onActivity();
     });
-    page.on('download', (dl) => {
-      const dlId = this.nextDownloadId++;
-      const safeName = (dl.suggestedFilename() || 'download').replace(/[\\/:*?"<>|]/g, '_');
-      const file = path.join(DOWNLOADS_DIR, `${dlId}-${safeName}`);
-      const info: DownloadInfo = { id: dlId, ts: new Date().toISOString(), tab: id, url: dl.url(), file, state: 'saving' };
-      this.downloads.push(info);
-      // 上限を超えたら古いエントリから捨てる(ダウンロード済みファイルの実体は残す)。
-      if (this.downloads.length > DOWNLOADS_CAP) this.downloads.splice(0, this.downloads.length - DOWNLOADS_CAP);
-      dl.saveAs(file).then(
-        () => {
-          info.state = 'saved';
-        },
-        (err) => {
-          info.state = 'failed';
-          info.error = String(err instanceof Error ? err.message : err).split('\n')[0];
-        },
-      );
-    });
+    page.on('download', (dl) => this.downloads.handle(dl, id));
 
     return id;
   }
 
-  /** ダイアログ関連イベントをコンソールログ(kind=dialog)とジャーナルに記録する。 */
+  /** ダイアログ関連イベントをコンソールログ(kind=dialog)とジャーナルに記録する(DialogManager の onLog)。 */
   private logDialog(tab: number, text: string): void {
     this.consoleLog.push({ ts: new Date().toISOString(), tab, kind: 'dialog', text });
     this.onJournalConsole({ kind: 'dialog', text, tab });
   }
 
-  /**
-   * ダイアログの閉鎖を CDP で監視する。Playwright の Dialog には閉鎖イベントがなく、
-   * headed でユーザーがネイティブ UI から直接応答した場合に保留が残ってしまうため、
-   * 自前の CDPSession で Page.javascriptDialogClosed を購読して解除する。
-   */
-  private async watchDialogClose(page: Page, id: number): Promise<void> {
-    try {
-      const cdp = await page.context().newCDPSession(page);
-      cdp.on('Page.javascriptDialogClosed', (e: { result: boolean }) => {
-        const pending = this.pendingDialogs.get(id);
-        this.pendingDialogs.delete(id);
-        if (pending) {
-          this.logDialog(id, `${pending.info.type}「${pending.info.message}」が${e.result ? '承認' : 'キャンセル'}されました`);
-        }
-      });
-      await cdp.send('Page.enable');
-    } catch {
-      // 購読できなくても保留解除は dialogRespond のエラー処理で自己修復する
-    }
-  }
-
-  /**
-   * 操作を実行しつつ、その操作で JS ダイアログが開いて保留になったら完了を待たずに
-   * ダイアログ情報を返す(保留中はページの JS が止まるため、操作はタイムアウトまで
-   * 完了しない)。操作自体は裏で継続し、ダイアログ応答後に完結する。
-   */
-  private async actOrDialog<T>(id: number, page: Page, run: () => Promise<T>, onDialog: (d: DialogInfo) => T): Promise<T> {
-    if (this.dialogPolicy !== 'hold') return run();
-    let notify!: (info: DialogInfo) => void;
-    const opened = new Promise<DialogInfo>((resolve) => (notify = resolve));
-    const waiters = this.dialogWaiters.get(id) ?? new Set();
-    waiters.add(notify);
-    this.dialogWaiters.set(id, waiters);
-    try {
-      const action = run();
-      action.catch(() => {}); // 早期リターン後にタイムアウトしても unhandled rejection にしない
-      const winner = await Promise.race([
-        action.then((value) => ({ value })),
-        opened.then((dialog) => ({ dialog })),
-      ]);
-      return 'value' in winner ? winner.value : onDialog(winner.dialog);
-    } finally {
-      waiters.delete(notify);
-    }
-  }
-
   /** タブ指定を解決する。応答待ちダイアログがある間、ページ JS を使う操作は進められないため既定で弾く。 */
   private getPage(tabId?: number, opts: { allowDialog?: boolean } = {}): { id: number; page: Page } {
-    const id = tabId ?? this.activeTabId;
+    const id = tabId ?? this.tabs.active;
     if (id == null) throw new Error('開いているタブがありません。まず kb open <url> を実行してください。');
     const page = this.tabs.get(id);
     if (!page) throw new Error(`タブ ${id} は存在しません。kb tabs で確認してください。`);
-    if (!opts.allowDialog && this.pendingDialogs.has(id)) {
-      const { info } = this.pendingDialogs.get(id)!;
+    if (!opts.allowDialog && this.dialogs.has(id)) {
+      const info = this.dialogs.get(id)!;
       throw new Error(
         `タブ ${id} で ${info.type} ダイアログ「${info.message}」が応答待ちです。kb dialog accept / kb dialog dismiss で応答してください(headed ならウィンドウ上でも応答できます)。`,
       );
@@ -452,8 +264,8 @@ export class BrowserHost {
 
   /** 操作後の現在地(URL / タイトル)。ナビゲーション中なら少し待つ。ダイアログ応答待ちなら待たずにその情報を返す。 */
   private async feedback(id: number, page: Page): Promise<ActionResult> {
-    const pending = this.pendingDialogs.get(id);
-    if (pending) return { url: page.url(), title: '', dialog: pending.info };
+    const dialog = this.dialogs.get(id);
+    if (dialog) return { url: page.url(), title: '', dialog };
     await page.waitForLoadState('domcontentloaded', { timeout: 3_000 }).catch(() => {});
     return { url: page.url(), title: await page.title().catch(() => '') };
   }
@@ -468,28 +280,28 @@ export class BrowserHost {
   ): Promise<{ tab: number; url: string; title: string }> {
     let id: number;
     let page: Page;
-    if (newTab || (this.activeTabId == null && tabId == null)) {
+    if (newTab || (this.tabs.active == null && tabId == null)) {
       page = await this.context.newPage();
       id = this.registerTab(page);
     } else {
       ({ id, page } = this.getPage(tabId));
     }
     await page.goto(normalizeUrl(url), { waitUntil });
-    this.activeTabId = id;
+    this.tabs.active = id;
     return { tab: id, url: page.url(), title: await page.title().catch(() => '') };
   }
 
   async listTabs(): Promise<TabInfo[]> {
     const result: TabInfo[] = [];
-    for (const [id, page] of this.tabs) {
+    for (const [id, page] of this.tabs.entries()) {
       let title = '';
       try {
         // ダイアログ応答待ちのタブは JS が止まっており title() が返らないためスキップ
-        if (!this.pendingDialogs.has(id)) title = await page.title();
+        if (!this.dialogs.has(id)) title = await page.title();
       } catch {
         /* page might be navigating */
       }
-      result.push({ id, url: page.url(), title, active: id === this.activeTabId });
+      result.push({ id, url: page.url(), title, active: id === this.tabs.active });
     }
     return result;
   }
@@ -508,7 +320,7 @@ export class BrowserHost {
     // ダイアログ応答待ちのタブも前面に出せる(ユーザーがウィンドウ上で応答するため)
     const { id, page } = this.getPage(tabId, { allowDialog: true });
     await page.bringToFront();
-    this.activeTabId = id;
+    this.tabs.active = id;
   }
 
   /** スクリーンショット。selector / ref を指定すると要素単位で撮る。 */
@@ -611,9 +423,8 @@ export class BrowserHost {
 
   async click(t: Target): Promise<ActionResult> {
     const { id, page } = this.getPage(t.tab);
-    return this.actOrDialog(
+    return this.dialogs.actOrDialog(
       id,
-      page,
       async () => this.acted(id, page, await this.targets.act(page, id, t, (loc) => loc.click({ timeout: ACTION_TIMEOUT }))),
       (d) => this.dialogResult(page, d),
     );
@@ -621,9 +432,8 @@ export class BrowserHost {
 
   async fill(t: Target, value: string): Promise<ActionResult> {
     const { id, page } = this.getPage(t.tab);
-    return this.actOrDialog(
+    return this.dialogs.actOrDialog(
       id,
-      page,
       async () => this.acted(id, page, await this.targets.act(page, id, t, (loc) => loc.fill(value, { timeout: ACTION_TIMEOUT }))),
       (d) => this.dialogResult(page, d),
     );
@@ -631,9 +441,8 @@ export class BrowserHost {
 
   async press(key: string, tabId?: number): Promise<ActionResult> {
     const { id, page } = this.getPage(tabId);
-    return this.actOrDialog(
+    return this.dialogs.actOrDialog(
       id,
-      page,
       async () => {
         await page.keyboard.press(key);
         return this.feedback(id, page);
@@ -650,9 +459,8 @@ export class BrowserHost {
 
   async setChecked(t: Target, checked: boolean): Promise<ActionResult> {
     const { id, page } = this.getPage(t.tab);
-    return this.actOrDialog(
+    return this.dialogs.actOrDialog(
       id,
-      page,
       async () =>
         this.acted(id, page, await this.targets.act(page, id, t, (loc) => loc.setChecked(checked, { timeout: ACTION_TIMEOUT }))),
       (d) => this.dialogResult(page, d),
@@ -661,9 +469,8 @@ export class BrowserHost {
 
   async select(t: Target, values: string[], byLabel: boolean): Promise<ActionResult & { selected: string[] }> {
     const { id, page } = this.getPage(t.tab);
-    return this.actOrDialog(
+    return this.dialogs.actOrDialog(
       id,
-      page,
       async () => {
         const r = await this.targets.act(page, id, t, (loc) =>
           byLabel
@@ -730,13 +537,11 @@ export class BrowserHost {
   // ---- ダウンロード ----
 
   listDownloads(): DownloadInfo[] {
-    return this.downloads;
+    return this.downloads.list();
   }
 
   clearDownloads(): { cleared: number } {
-    const n = this.downloads.length;
-    this.downloads = [];
-    return { cleared: n };
+    return this.downloads.clear();
   }
 
   // ---- Cookie / ストレージ ----
@@ -858,81 +663,8 @@ export class BrowserHost {
    * ブラウザの context.request で HTTP リクエストを送る。ページを開かずに API を叩ける。
    * Cookie はブラウザと共有され(Set-Cookie も反映される)、プロキシ設定も同じものを使う。
    */
-  async httpRequest(opts: {
-    url: string;
-    method?: string;
-    headers?: Record<string, string>;
-    data?: string;
-    timeoutMs?: number;
-    follow?: boolean;
-    savePath?: string;
-    maxChars?: number;
-    offset?: number;
-  }): Promise<{
-    status: number;
-    statusText: string;
-    url: string;
-    headers: Record<string, string>;
-    contentType: string;
-    ms: number;
-    bytes: number;
-    savedTo?: string;
-    binary?: boolean;
-    body?: string;
-    totalChars?: number;
-    offset?: number;
-    truncated?: boolean;
-    setCookies?: string[];
-  }> {
-    const started = Date.now();
-    // JSON に見えるボディで Content-Type 未指定なら application/json を補う(明示ヘッダ優先)
-    const inferred = inferJsonContentType(opts.data, opts.headers);
-    const headersToSend = inferred ? { ...(opts.headers ?? {}), 'content-type': inferred } : opts.headers;
-    const res = await this.context.request.fetch(normalizeUrl(opts.url), {
-      method: (opts.method ?? 'GET').toUpperCase(),
-      headers: headersToSend,
-      data: opts.data,
-      timeout: opts.timeoutMs ?? REQUEST_TIMEOUT_SEC * 1000,
-      maxRedirects: opts.follow === false ? 0 : undefined,
-      failOnStatusCode: false,
-    });
-    const ms = Date.now() - started;
-    const buf = await res.body().catch(() => Buffer.alloc(0)); // 204 等の空レスポンス
-    const headers = res.headers();
-    // res.headers() は複数の Set-Cookie を 1 つに畳んでしまい個々の cookie を parse できない。
-    // headersArray() は各 Set-Cookie を別エントリで保持するので、そこから個別に取り出す。
-    const setCookies = res
-      .headersArray()
-      .filter((h) => h.name.toLowerCase() === 'set-cookie')
-      .map((h) => h.value);
-    const contentType = headers['content-type'] ?? '';
-    const base = {
-      status: res.status(),
-      statusText: res.statusText(),
-      url: res.url(),
-      headers,
-      contentType,
-      ms,
-      bytes: buf.length,
-      // 空配列のときは結果要約に載せない(ヘッダ系レスポンスのノイズを抑える)
-      ...(setCookies.length ? { setCookies } : {}),
-    };
-    res.dispose().catch(() => {});
-    if (opts.savePath) {
-      fs.writeFileSync(opts.savePath, buf);
-      return { ...base, savedTo: opts.savePath };
-    }
-    if (buf.length > 0 && contentType && !TEXT_CONTENT_RE.test(contentType)) {
-      return { ...base, binary: true };
-    }
-    const clipped = clip(buf.toString('utf8'), { maxChars: opts.maxChars ?? TEXT_CAP, offset: opts.offset });
-    return {
-      ...base,
-      body: clipped.text,
-      totalChars: clipped.totalChars,
-      offset: clipped.offset,
-      truncated: clipped.truncated,
-    };
+  async httpRequest(opts: HttpRequestOptions): Promise<HttpResult> {
+    return httpRequest(this.context, opts);
   }
 
   // ---- コンソール (DevTools Console 相当) ----
@@ -994,7 +726,7 @@ export class BrowserHost {
           return p;
         }),
       ).catch(() => {
-        throw this.withDialogHint(
+        throw this.dialogs.withHint(
           id,
           new Error(`どの条件も ${Math.round(opts.timeoutMs / 1000)} 秒以内に満たされませんでした (${conds.map((c) => c.name).join(' / ')})`),
         );
@@ -1002,38 +734,16 @@ export class BrowserHost {
       return { url: page.url(), matched: [first] };
     }
     await Promise.all(conds.map((c) => c.wait())).catch((err) => {
-      throw this.withDialogHint(id, err);
+      throw this.dialogs.withHint(id, err);
     });
     return { url: page.url(), matched: conds.map((c) => c.name) };
   }
 
-  /** 保留ダイアログが操作をブロックしている可能性があるとき、エラーにその旨のヒントを付ける。 */
-  private withDialogHint(id: number, err: unknown): Error {
-    const message = err instanceof Error ? err.message : String(err);
-    const pending = this.pendingDialogs.get(id);
-    if (!pending) return err instanceof Error ? err : new Error(message);
-    return new Error(
-      `${message}\n(タブ ${id} で ${pending.info.type} ダイアログ「${pending.info.message}」が応答待ちです。kb dialog accept / dismiss で応答できます)`,
-    );
-  }
-
-  // ---- JS ダイアログ (alert / confirm / prompt) ----
-
-  /** 保留中ダイアログの解決。tab 省略時は保留が 1 件ならそれ、複数ならアクティブタブ。 */
-  private resolvePendingDialog(tabId?: number): { dialog: Dialog; info: DialogInfo } | null {
-    if (tabId != null) return this.pendingDialogs.get(tabId) ?? null;
-    if (this.pendingDialogs.size === 1) return [...this.pendingDialogs.values()][0];
-    if (this.activeTabId != null) return this.pendingDialogs.get(this.activeTabId) ?? null;
-    return null;
-  }
+  // ---- JS ダイアログ (alert / confirm / prompt) — DialogManager へ委譲 ----
 
   /** 保留中ダイアログの情報と現在のポリシー。 */
   dialogInfo(tabId?: number): { pending: DialogInfo | null; pendingTabs: number[]; policy: DialogPolicy } {
-    return {
-      pending: this.resolvePendingDialog(tabId)?.info ?? null,
-      pendingTabs: [...this.pendingDialogs.keys()],
-      policy: this.dialogPolicy,
-    };
+    return this.dialogs.info(tabId, this.tabs.active);
   }
 
   /** 保留中ダイアログに応答する。promptText は prompt の入力値(accept 時のみ)。 */
@@ -1042,37 +752,12 @@ export class BrowserHost {
     promptText?: string,
     tabId?: number,
   ): Promise<{ responded: 'accept' | 'dismiss'; dialog: DialogInfo }> {
-    const pending = this.resolvePendingDialog(tabId);
-    if (!pending) {
-      const tabs = [...this.pendingDialogs.keys()];
-      throw new Error(
-        tabs.length
-          ? `保留中のダイアログが複数あります。-t でタブを指定してください (タブ: ${tabs.join(', ')})`
-          : '応答待ちのダイアログはありません。',
-      );
-    }
-    try {
-      if (accept) await pending.dialog.accept(promptText);
-      else await pending.dialog.dismiss();
-    } catch {
-      // ユーザーがウィンドウ上で先に応答済みなど。保留を確実に解除して分かるエラーにする
-      this.pendingDialogs.delete(pending.info.tab);
-      throw new Error('ダイアログは既に閉じられています(ウィンドウ上で応答済みの可能性があります)。');
-    }
-    // 通常は watchDialogClose が消すが、CDP 購読に失敗している環境向けの保険
-    this.pendingDialogs.delete(pending.info.tab);
-    return { responded: accept ? 'accept' : 'dismiss', dialog: pending.info };
+    return this.dialogs.respond(accept, promptText, tabId, this.tabs.active);
   }
 
   /** ダイアログの応答ポリシーを設定/取得する。 */
   setDialogPolicy(policy?: DialogPolicy): { policy: DialogPolicy } {
-    if (policy != null) {
-      if (!['hold', 'accept', 'dismiss'].includes(policy)) {
-        throw new Error(`不正なポリシーです: ${policy} (hold | accept | dismiss)`);
-      }
-      this.dialogPolicy = policy;
-    }
-    return { policy: this.dialogPolicy };
+    return this.dialogs.setPolicy(policy);
   }
 
   // ---- エミュレーション (Emulator へ委譲) ----
@@ -1151,16 +836,16 @@ export class BrowserHost {
       channel: this.channel,
       profile: this.profile,
       tabs: this.tabs.size,
-      activeTab: this.activeTabId,
-      downloads: this.downloads.length,
+      activeTab: this.tabs.active,
+      downloads: this.downloads.count,
       httpAuth: this.opts?.httpCredentials != null,
       ...(this.attached ? { attached: this.opts?.cdpUrl } : {}),
       ...(this.opts?.stealth ? { stealth: true } : {}),
       ...(this.opts?.extensions ? { extensions: this.opts.extensions } : {}),
       ...(this.opts?.ignoreHttpsErrors ? { ignoreHttpsErrors: true } : {}),
       ...(this.opts?.ignoreCertErrorsSpkiList?.length ? { trustedCaSpki: this.opts.ignoreCertErrorsSpkiList.length } : {}),
-      ...(this.pendingDialogs.size ? { pendingDialogs: [...this.pendingDialogs.keys()] } : {}),
-      ...(this.dialogPolicy !== 'hold' ? { dialogPolicy: this.dialogPolicy } : {}),
+      ...(this.dialogs.pendingCount ? { pendingDialogs: this.dialogs.pendingTabs } : {}),
+      ...(this.dialogs.currentPolicy !== 'hold' ? { dialogPolicy: this.dialogs.currentPolicy } : {}),
     };
   }
 }
