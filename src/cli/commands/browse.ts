@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { rpc } from '../../shared/client';
+import { REQUEST_TIMEOUT_SEC } from '../../shared/constants';
+import { headersWithSetCookie, setCookieLines } from '../../shared/format';
 import { parseHeaderArgs } from '../../shared/util';
 import { fmtTabs, intOpt, print, run, truncNote } from '../output';
 
@@ -139,7 +141,7 @@ export function registerBrowseCommands(program: Command): void {
         const result = await rpc('eval', { expression, tab: opts.tab, maxChars: opts.maxChars, offset: opts.offset });
         print(result, (r) => {
           const body = typeof r.result === 'string' ? r.result : JSON.stringify(r.result, null, 2);
-          return `${body}${r.truncated ? truncNote(r, String(r.result).length) : ''}`;
+          return `${body}${r.truncated ? truncNote(r, body.length) : ''}`;
         });
       }),
     );
@@ -152,7 +154,7 @@ export function registerBrowseCommands(program: Command): void {
     .option('-d, --data <body>', 'リクエストボディ')
     .option('--data-file <path>', 'ボディをファイルから読み込む')
     .option('--no-follow', 'リダイレクトを追わない')
-    .option('--timeout <sec>', 'タイムアウト秒数', intOpt, 30)
+    .option('--timeout <sec>', 'タイムアウト秒数', intOpt, REQUEST_TIMEOUT_SEC)
     .option('-o, --out <file>', 'レスポンス本文をファイルに保存する(バイナリ向け)')
     .option('-i, --include', 'レスポンスヘッダも表示する')
     .option('--max-chars <n>', '本文の最大文字数 (0 = 無制限)', intOpt)
@@ -193,13 +195,10 @@ export function registerBrowseCommands(program: Command): void {
             if (r.url !== url) out += `\n→ ${r.url}`;
             const setCookies: string[] = r.setCookies ?? [];
             if (opts.include) {
-              // set-cookie は複数個を個別行で出す(res.headers() の畳み込みでは 1 行に潰れて parse できないため setCookies を使う)
-              const other = Object.entries(r.headers).filter(([k]) => k.toLowerCase() !== 'set-cookie');
-              out += '\n' + other.map(([k, v]) => `${k}: ${v}`).join('\n');
-              out += setCookies.map((c) => `\nset-cookie: ${c}`).join('');
+              out += headersWithSetCookie(r.headers, setCookies);
             } else if (setCookies.length) {
               // -i なしでも Set-Cookie はブラウザ context に反映される副作用なので常に見せる
-              out += setCookies.map((c) => `\nset-cookie: ${c}`).join('');
+              out += setCookieLines(setCookies);
             }
             if (r.savedTo) return `${out}\n本文を保存しました: ${r.savedTo}`;
             if (r.binary) return `${out}\n(バイナリ本文のため表示しません。-o <file> で保存できます)`;

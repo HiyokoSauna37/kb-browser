@@ -16,6 +16,7 @@ import {
   loadCaFromFile,
   removeCaFromStore,
 } from '../caTrust';
+import { hhmmss } from '../../shared/format';
 import { intOpt, print, run } from '../output';
 
 /** trust-ca が MITM ルート CA を抽出するために接続する既定の HTTPS ホスト。 */
@@ -330,7 +331,7 @@ export function registerProxyCommands(program: Command): void {
             ? `\n最近の接続エラー:` +
               s.lastErrors
                 .slice(-5)
-                .map((e: any) => `\n  ${e.ts.slice(11, 19)} ${e.target} (via ${e.profile}) — ${e.error}`)
+                .map((e: any) => `\n  ${hhmmss(e.ts)} ${e.target} (via ${e.profile}) — ${e.error}`)
                 .join('')
             : '';
           // HTTPS は CONNECT トンネルとして tunnels に、平文 HTTP は requests に計上される。
@@ -365,7 +366,7 @@ export function registerProxyCommands(program: Command): void {
     .description('ルールを削除する(kb proxy rule list の番号で指定)')
     .action(
       run(async (indexStr: string) => {
-        const index = parseInt(indexStr, 10);
+        const index = intOpt(indexStr);
         const cfg = loadProxyConfig();
         if (!(index >= 0 && index < cfg.rules.length)) throw new Error(`ルール ${index} は存在しません`);
         const [removed] = cfg.rules.splice(index, 1);

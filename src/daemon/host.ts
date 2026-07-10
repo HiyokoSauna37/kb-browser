@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Dialog, type Page } from 'playwright';
+import { REQUEST_TIMEOUT_SEC } from '../shared/constants';
 import { DOWNLOADS_DIR, PROFILES_DIR } from '../shared/paths';
 import { clip, inferJsonContentType, LogBuffer, normalizeUrl, prepareEval } from '../shared/util';
 import { Emulator } from './emulation';
@@ -891,7 +892,7 @@ export class BrowserHost {
       method: (opts.method ?? 'GET').toUpperCase(),
       headers: headersToSend,
       data: opts.data,
-      timeout: opts.timeoutMs ?? 30_000,
+      timeout: opts.timeoutMs ?? REQUEST_TIMEOUT_SEC * 1000,
       maxRedirects: opts.follow === false ? 0 : undefined,
       failOnStatusCode: false,
     });

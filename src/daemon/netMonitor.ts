@@ -330,7 +330,7 @@ export class NetMonitor {
       const timing = req.timing();
       const contentType = res.headers()['content-type'] ?? '';
       let text: string | undefined;
-      if (/text|json|javascript|xml|html|css|svg/.test(contentType)) {
+      if (TEXT_CONTENT_RE.test(contentType)) {
         const body = await res.body();
         if (body.length <= HAR_BODY_CAP) text = body.toString('utf8');
       }

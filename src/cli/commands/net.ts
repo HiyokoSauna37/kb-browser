@@ -2,23 +2,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { rpc } from '../../shared/client';
+import { CONSOLE_DEFAULT_LIMIT, NET_LOG_DEFAULT_LIMIT } from '../../shared/constants';
+import { hhmmss } from '../../shared/format';
 import { inferJsonContentType } from '../../shared/util';
 import { intOpt, isJsonOutput, print, run, truncNote } from '../output';
 
 const FOLLOW_INTERVAL_MS = 700;
 
-function fmtTime(ts: string): string {
-  return ts.slice(11, 19);
-}
-
 function fmtNetEntry(e: any): string {
   const status = e.event === 'requestfailed' ? `FAIL(${e.failure ?? '?'})` : (e.status ?? '…');
   // 行頭の #seq は kb net body <seq> に渡せる(本文は response 行に対して捕捉される)
-  return `#${String(e.seq).padEnd(5)} ${fmtTime(e.ts)} [${e.tab}] ${String(e.method).padEnd(6)} ${String(status).padEnd(4)} ${e.resourceType.padEnd(10)} ${e.url}`;
+  return `#${String(e.seq).padEnd(5)} ${hhmmss(e.ts)} [${e.tab}] ${String(e.method).padEnd(6)} ${String(status).padEnd(4)} ${e.resourceType.padEnd(10)} ${e.url}`;
 }
 
 function fmtConsoleEntry(e: any): string {
-  return `${fmtTime(e.ts)} [${e.tab}] [${e.kind}] ${e.text}`;
+  return `${hhmmss(e.ts)} [${e.tab}] [${e.kind}] ${e.text}`;
 }
 
 /**
@@ -74,7 +72,7 @@ export function registerNetCommands(program: Command): void {
     .description('ネットワークログを表示する')
     .option('-t, --tab <id>', '対象タブ ID', intOpt)
     .option('--filter <regex>', 'URL を正規表現で絞り込む')
-    .option('-n, --limit <n>', '表示件数', intOpt, 50)
+    .option('-n, --limit <n>', '表示件数', intOpt, NET_LOG_DEFAULT_LIMIT)
     .option('--responses', '完了相 (response / FAIL) の行だけ表示する(送信相との二重行を省く)')
     .option('-f, --follow', '新着を流し続ける (Ctrl+C で終了。エージェントは --for と併用)')
     .option('--for <sec>', 'follow を指定秒数で自動終了する', intOpt)
@@ -185,8 +183,8 @@ export function registerNetCommands(program: Command): void {
           return print(result, (r) => `${r.removed} 件のルールを解除しました`);
         }
         if (id === undefined) throw new Error('解除するルールの id か --all を指定してください (id は kb net rules で確認)');
-        await rpc('net.unroute', { id: parseInt(id, 10) });
-        print({ removed: parseInt(id, 10) }, () => `ルール ${id} を解除しました`);
+        await rpc('net.unroute', { id: intOpt(id) });
+        print({ removed: intOpt(id) }, () => `ルール ${id} を解除しました`);
       }),
     );
 
@@ -236,7 +234,7 @@ export function registerNetCommands(program: Command): void {
     .command('console')
     .description('ページのコンソールログ・エラーを表示する')
     .option('-t, --tab <id>', '対象タブ ID', intOpt)
-    .option('-n, --limit <n>', '表示件数', intOpt, 50)
+    .option('-n, --limit <n>', '表示件数', intOpt, CONSOLE_DEFAULT_LIMIT)
     .option('-f, --follow', '新着を流し続ける (Ctrl+C で終了。エージェントは --for と併用)')
     .option('--for <sec>', 'follow を指定秒数で自動終了する', intOpt)
     .option('--clear', 'ログを消去する')

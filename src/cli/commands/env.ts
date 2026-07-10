@@ -4,7 +4,8 @@ import readline from 'node:readline';
 import type { Command } from 'commander';
 import { PROFILES_DIR, readLastRun, writeLastRun } from '../../shared/paths';
 import { pingDaemon, rpc, rpcRaw } from '../../shared/client';
-import { fmtTabs, intOpt, print, run } from '../output';
+import { WAIT_DEFAULT_SEC, WAIT_MAX_SEC } from '../../shared/constants';
+import { floatOpt, fmtTabs, intOpt, print, run } from '../output';
 
 /** stdin から Enter を待つ(メッセージは stderr に出し、--json の標準出力を汚さない)。 */
 function promptEnter(message: string): Promise<void> {
@@ -83,11 +84,11 @@ export function registerEnvCommands(program: Command): void {
     .option('--selector-gone <sel>', 'この CSS セレクタが消える(非表示/DOM から除去)まで。ボット検出チャレンジの通過検知などに')
     .option('--idle', 'ネットワークが落ち着くまで (SPA の描画待ちに)')
     .option('--any', '複数条件のどれか 1 つで待機を終える(既定はすべて満たすまで待つ AND)')
-    .option('--timeout <sec>', 'タイムアウト秒数 (既定 90、最大 280)', intOpt, 90)
+    .option('--timeout <sec>', 'タイムアウト秒数 (既定 90、最大 280)', intOpt, WAIT_DEFAULT_SEC)
     .option('-t, --tab <id>', '対象タブ ID', intOpt)
     .action(
       run(async (opts: { url?: string; selector?: string; selectorGone?: string; idle?: boolean; any?: boolean; timeout: number; tab?: number }) => {
-        const timeoutMs = Math.min(opts.timeout, 280) * 1000;
+        const timeoutMs = Math.min(opts.timeout, WAIT_MAX_SEC) * 1000;
         const result = await rpc('wait', {
           url: opts.url,
           selector: opts.selector,
@@ -111,7 +112,7 @@ export function registerEnvCommands(program: Command): void {
     .option('--until <glob>', 'この URL glob に一致したら完了 (例: "**/dashboard**")')
     .option('--until-selector <sel>', 'この CSS セレクタが現れたら完了(ログイン後にだけ出る要素など)')
     .option('--until-gone <sel>', 'この CSS セレクタが消えたら完了(Cloudflare 等のチャレンジ iframe が消える = 通過)')
-    .option('--timeout <sec>', '完了条件の待機タイムアウト秒 (既定 280)。条件未指定時は Enter 押下で完了', intOpt, 280)
+    .option('--timeout <sec>', '完了条件の待機タイムアウト秒 (既定 280)。条件未指定時は Enter 押下で完了', intOpt, WAIT_MAX_SEC)
     .option('--save <file>', '完了後に storage dump をこのファイルにも保存する(別プロファイル/別マシンへの持ち出し用)')
     .action(
       run(async (url: string | undefined, opts: { until?: string; untilSelector?: string; untilGone?: string; timeout: number; save?: string }) => {
@@ -129,7 +130,7 @@ export function registerEnvCommands(program: Command): void {
             selector: opts.untilSelector,
             selectorGone: opts.untilGone,
             any: true,
-            timeoutMs: Math.min(opts.timeout, 280) * 1000,
+            timeoutMs: Math.min(opts.timeout, WAIT_MAX_SEC) * 1000,
           });
         } else {
           if (!process.stdin.isTTY) {
@@ -195,7 +196,7 @@ export function registerEnvCommands(program: Command): void {
   emulate
     .command('viewport <size>')
     .description('画面サイズを上書きする (例: 390x844)')
-    .option('--dpr <n>', 'devicePixelRatio', (v: string) => parseFloat(v), 1)
+    .option('--dpr <n>', 'devicePixelRatio', floatOpt, 1)
     .option('--mobile', 'モバイルとして扱う(タッチも有効化)')
     .option('-t, --tab <id>', '対象タブ ID', intOpt)
     .action(
@@ -226,8 +227,8 @@ export function registerEnvCommands(program: Command): void {
     .description('位置情報をモックする(全タブに適用)')
     .action(
       run(async (lat: string, lng: string) => {
-        await rpc('emulate.geo', { latitude: parseFloat(lat), longitude: parseFloat(lng) });
-        print({ latitude: parseFloat(lat), longitude: parseFloat(lng) }, () => `位置情報を ${lat}, ${lng} にしました`);
+        await rpc('emulate.geo', { latitude: floatOpt(lat), longitude: floatOpt(lng) });
+        print({ latitude: floatOpt(lat), longitude: floatOpt(lng) }, () => `位置情報を ${lat}, ${lng} にしました`);
       }),
     );
 

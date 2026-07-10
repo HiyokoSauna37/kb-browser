@@ -122,11 +122,6 @@ export interface DialogInfo {
  */
 export type DialogPolicy = 'hold' | 'accept' | 'dismiss';
 
-/** リングバッファ(net / console ログ)の上限。超えた分は古いものから捨てる。 */
-export const LOG_CAP = 3000;
-
-/** text / html / snapshot などのデフォルト出力上限(コンテキスト溢れ防止)。--max-chars 0 で無制限。 */
-export const TEXT_CAP = 20_000;
-
-/** 本文を捕捉・表示するテキスト系 Content-Type。 */
-export const TEXT_CONTENT_RE = /text|json|javascript|xml|html|css|svg|form-urlencoded/;
+// 調整定数は CLI / MCP とも共有するため shared/constants.ts へ移動した。
+// デーモン内の既存 import 先として従来どおりここからも参照できるようにする。
+export { LOG_CAP, TEXT_CAP, TEXT_CONTENT_RE } from '../shared/constants';

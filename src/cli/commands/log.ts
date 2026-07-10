@@ -14,6 +14,7 @@ import {
   type OpEvent,
   type SessionMeta,
 } from '../../shared/oplog';
+import { hhmmss } from '../../shared/format';
 import { intOpt, isJsonOutput, print, run } from '../output';
 
 interface MaskCliOpts {
@@ -167,9 +168,9 @@ export function registerLogCommands(program: Command): void {
           list.length
             ? list
                 .map((e) => {
-                  if (e.type === 'command') return `#${e.seq} ${e.ts.slice(11, 19)} $ ${toCliString(e)}${e.ok ? '' : `  ← 失敗: ${e.error ?? ''}`}`;
-                  if (e.type === 'net') return `#${e.seq} ${e.ts.slice(11, 19)}   ↳ ${e.method} ${e.url} → ${e.status ?? '?'}`;
-                  return `#${e.seq} ${e.ts.slice(11, 19)}   ↳ console[${e.kind}] ${e.text.slice(0, 150)}`;
+                  if (e.type === 'command') return `#${e.seq} ${hhmmss(e.ts)} $ ${toCliString(e)}${e.ok ? '' : `  ← 失敗: ${e.error ?? ''}`}`;
+                  if (e.type === 'net') return `#${e.seq} ${hhmmss(e.ts)}   ↳ ${e.method} ${e.url} → ${e.status ?? '?'}`;
+                  return `#${e.seq} ${hhmmss(e.ts)}   ↳ console[${e.kind}] ${e.text.slice(0, 150)}`;
                 })
                 .join('\n')
             : 'イベントはありません',

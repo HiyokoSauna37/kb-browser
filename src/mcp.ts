@@ -6,6 +6,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { pingDaemon, rpc, rpcRaw, spawnedDaemonHere } from './shared/client';
+import {
+  CONSOLE_DEFAULT_LIMIT,
+  NET_LOG_DEFAULT_LIMIT,
+  REQUEST_TIMEOUT_SEC,
+  WAIT_DEFAULT_SEC,
+  WAIT_MAX_SEC,
+} from './shared/constants';
+import { headersWithSetCookie, setCookieLines, truncSpan } from './shared/format';
 import { loadProxyConfig, saveProxyConfig } from './shared/proxyStore';
 import { KB_VERSION } from './shared/version';
 
@@ -28,11 +36,11 @@ function text(result: unknown): ToolResult {
   };
 }
 
-/** 切り詰められた本文に続きの読み方を付記する。 */
+/** 切り詰められた本文に続きの読み方を付記する(範囲計算は CLI 側と共有)。 */
 function withTruncNote(body: string, r: { totalChars: number; offset: number; truncated: boolean }): string {
   if (!r.truncated) return body;
-  const next = r.offset + body.length;
-  return `${body}\n\n…(${r.offset + 1}〜${next}/${r.totalChars} 文字を表示。続きは offset=${next} で取得)`;
+  const { from, next, total } = truncSpan(r, body.length);
+  return `${body}\n\n…(${from}〜${next}/${total} 文字を表示。続きは offset=${next} で取得)`;
 }
 
 /**
@@ -216,7 +224,7 @@ tool(
     limit: z.number().int().optional().describe('最大件数(既定 50)'),
     tab,
   },
-  safe(async ({ filter, limit, tab }) => text((await rpc('net.log', { filter, limit: limit ?? 50, tab })).entries)),
+  safe(async ({ filter, limit, tab }) => text((await rpc('net.log', { filter, limit: limit ?? NET_LOG_DEFAULT_LIMIT, tab })).entries)),
 );
 
 tool(
@@ -259,7 +267,7 @@ tool(
       method,
       headers,
       data,
-      timeoutMs: (timeoutSec ?? 30) * 1000,
+      timeoutMs: (timeoutSec ?? REQUEST_TIMEOUT_SEC) * 1000,
       maxChars,
       offset,
     });
@@ -267,11 +275,9 @@ tool(
     const setCookies: string[] = r.setCookies ?? [];
     if (includeHeaders) {
       // set-cookie は個別行で出す(res.headers() の畳み込みでは parse できないため setCookies を使う)
-      const other = Object.entries(r.headers ?? {}).filter(([k]) => k.toLowerCase() !== 'set-cookie');
-      head += '\n' + other.map(([k, v]) => `${k}: ${v}`).join('\n');
-      head += setCookies.map((c) => `\nset-cookie: ${c}`).join('');
+      head += headersWithSetCookie(r.headers, setCookies);
     } else if (setCookies.length) {
-      head += setCookies.map((c) => `\nset-cookie: ${c}`).join('');
+      head += setCookieLines(setCookies);
     }
     if (r.binary) return text(`${head}\n(バイナリ本文のため省略)`);
     return text(withTruncNote(`${head}\n\n${r.body}`, r));
@@ -282,7 +288,7 @@ tool(
   'kb_console_log',
   'ページのコンソールログ・エラーを取得する。',
   { limit: z.number().int().optional().describe('最大件数(既定 50)'), tab },
-  safe(async ({ limit, tab }) => text((await rpc('console.log', { limit: limit ?? 50, tab })).entries)),
+  safe(async ({ limit, tab }) => text((await rpc('console.log', { limit: limit ?? CONSOLE_DEFAULT_LIMIT, tab })).entries)),
 );
 
 tool(
@@ -314,7 +320,17 @@ tool(
     tab,
   },
   safe(async ({ url, selector, selectorGone, idle, any, timeoutSec, tab }) =>
-    text(await rpc('wait', { url, selector, selectorGone, idle, any, timeoutMs: Math.min(timeoutSec ?? 90, 280) * 1000, tab })),
+    text(
+      await rpc('wait', {
+        url,
+        selector,
+        selectorGone,
+        idle,
+        any,
+        timeoutMs: Math.min(timeoutSec ?? WAIT_DEFAULT_SEC, WAIT_MAX_SEC) * 1000,
+        tab,
+      }),
+    ),
   ),
 );
 
