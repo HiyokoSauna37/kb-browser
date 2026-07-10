@@ -58,6 +58,13 @@ export class Journal {
   /** アクション実行後に自動スクリーンショットを撮るか(kb log start --shots)。 */
   autoShots = false;
   private shotCounter = 0;
+  /**
+   * 未書き込みのイベント行バッファ。net/console のような高頻度イベントは溜めておき、
+   * replay/report に効く command イベント境界(と stop / 500ms タイマ)でまとめて
+   * flush する。ハードクラッシュ時の喪失は「直近 command 以降の net/console」に限定される。
+   */
+  private buffer: string[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** セッションを開始する(既に開始済みなら閉じてから)。名前省略時はタイムスタンプ。 */
   start(
@@ -86,6 +93,7 @@ export class Journal {
 
   /** セッションを終了する(meta に endedAt を記録)。 */
   stop(): { name: string | null; events: number } {
+    this.flush(); // dir を落とす前に未書き込みを吐き切る
     const result = { name: this.meta?.name ?? null, events: this.seq };
     if (this.meta) {
       this.meta.endedAt = new Date().toISOString();
@@ -110,12 +118,34 @@ export class Journal {
     return { abs: path.join(this.dir, rel), rel };
   }
 
-  /** イベントを追記する(seq / ts はここで付与)。記録の失敗でデーモンを落とさない。 */
+  /**
+   * イベントをバッファに積む(seq / ts はここで付与)。command イベントは即 flush して
+   * replay/report に必要な記録を durable にし、それ以外(net/console)は溜めて
+   * command 境界・500ms タイマ・stop でまとめて書く。記録の失敗でデーモンは落とさない。
+   */
   append(event: DistributiveOmit<OpEvent, 'seq' | 'ts'>): void {
     if (!this.dir) return;
+    this.buffer.push(JSON.stringify({ seq: ++this.seq, ts: new Date().toISOString(), ...event }));
+    if (event.type === 'command') {
+      this.flush();
+    } else if (!this.flushTimer) {
+      // アイドル中でもいずれ吐き切るよう保険のタイマを 1 本だけ張る(unref でプロセスを延命しない)。
+      this.flushTimer = setTimeout(() => this.flush(), 500);
+      this.flushTimer.unref?.();
+    }
+  }
+
+  /** バッファ済みのイベント行をまとめて 1 回で追記する。 */
+  private flush(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (!this.dir || !this.buffer.length) return;
+    const chunk = this.buffer.join('\n') + '\n';
+    this.buffer = [];
     try {
-      const line = JSON.stringify({ seq: ++this.seq, ts: new Date().toISOString(), ...event });
-      fs.appendFileSync(path.join(this.dir, 'events.jsonl'), line + '\n');
+      fs.appendFileSync(path.join(this.dir, 'events.jsonl'), chunk);
     } catch {
       /* logging must never kill the daemon */
     }

@@ -242,4 +242,31 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
     assert.equal(r.status, 200);
     assert.match(r.contentType, /json/);
   });
+
+  test('journal: command イベントは RPC 直後にディスクへ flush される', { timeout: 30_000 }, async () => {
+    // 一意なマーカー URL を開き、その command が即座に events.jsonl に現れることを確認する
+    // (journal のバッファ書き込みは command 境界で同期 flush する契約)。
+    const marker = `data:text/html,<title>durability-${d.pid}</title>`;
+    await rpc('open', { url: marker });
+    const logsDir = path.join(d.home, 'logs');
+    const sessions = fs.readdirSync(logsDir);
+    assert.ok(sessions.length >= 1, 'セッションフォルダがあるはず');
+    const found = sessions.some((s) => {
+      const file = path.join(logsDir, s, 'events.jsonl');
+      if (!fs.existsSync(file)) return false;
+      return fs
+        .readFileSync(file, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .some((line) => {
+          try {
+            const e = JSON.parse(line);
+            return e.type === 'command' && e.cmd === 'open';
+          } catch {
+            return false;
+          }
+        });
+    });
+    assert.ok(found, 'open の command イベントが RPC 直後に events.jsonl へ書かれているはず');
+  });
 });

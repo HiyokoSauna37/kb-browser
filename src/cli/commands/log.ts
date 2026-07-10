@@ -15,6 +15,7 @@ import {
   type SessionMeta,
 } from '../../shared/oplog';
 import { hhmmss } from '../../shared/format';
+import { countEvents, readEventsAll, readEventsTail } from './logStore';
 import { intOpt, isJsonOutput, print, run } from '../output';
 
 interface MaskCliOpts {
@@ -68,25 +69,6 @@ function resolveSession(name?: string): { name: string; dir: string; meta: Sessi
   return { name: found.name, dir: found.dir, meta: found.meta ?? { name: found.name, startedAt: '' } };
 }
 
-function readEvents(dir: string): OpEvent[] {
-  let raw = '';
-  try {
-    raw = fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8');
-  } catch {
-    return [];
-  }
-  const events: OpEvent[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      events.push(JSON.parse(line));
-    } catch {
-      /* 壊れた行はスキップ */
-    }
-  }
-  return events;
-}
-
 /** replay で再実行する状態変更系コマンド(観測系や環境切替系は対象外)。 */
 const REPLAY_CMDS = new Set([
   'open', 'click', 'fill', 'press', 'hover', 'check', 'select', 'upload', 'scroll',
@@ -136,12 +118,14 @@ export function registerLogCommands(program: Command): void {
     .description('記録セッションの一覧を表示する')
     .action(
       run(async () => {
-        const sessions = listSessionDirs().map((s) => ({
-          name: s.name,
-          startedAt: s.meta?.startedAt,
-          endedAt: s.meta?.endedAt,
-          events: readEvents(s.dir).length,
-        }));
+        const sessions = await Promise.all(
+          listSessionDirs().map(async (s) => ({
+            name: s.name,
+            startedAt: s.meta?.startedAt,
+            endedAt: s.meta?.endedAt,
+            events: await countEvents(s.dir),
+          })),
+        );
         print(sessions, (list: any[]) =>
           list.length
             ? list
@@ -163,7 +147,8 @@ export function registerLogCommands(program: Command): void {
       run(async (opts: MaskCliOpts & { session?: string; limit: number }) => {
         const { dir } = resolveSession(opts.session);
         const mask = maskOptions(opts);
-        const events = readEvents(dir).map((e) => redactEvent(e, mask)).slice(-opts.limit);
+        // 末尾 limit 件だけ読む(redact は要素毎の純関数なので全件 redact→slice と等価)。
+        const events = (await readEventsTail(dir, opts.limit)).map((e) => redactEvent(e, mask));
         print(events, (list: OpEvent[]) =>
           list.length
             ? list
@@ -188,7 +173,7 @@ export function registerLogCommands(program: Command): void {
       run(async (opts: MaskCliOpts & { session?: string }) => {
         const { dir, meta } = resolveSession(opts.session);
         const mask = maskOptions(opts);
-        const events = readEvents(dir).map((e) => redactEvent(e, mask));
+        const events = (await readEventsAll(dir)).map((e) => redactEvent(e, mask));
         const md = stepsMarkdown(events, meta);
         print({ steps: md }, () => md);
       }),
@@ -207,7 +192,7 @@ export function registerLogCommands(program: Command): void {
         const mask = maskOptions(opts);
         const outDir = path.resolve(opts.out ?? `kb-log-${name}`);
         if (/\.zip$/i.test(outDir)) throw new Error('出力先はフォルダを指定してください(zip が必要な場合は生成後に Compress-Archive 等で圧縮)');
-        const raw = readEvents(dir);
+        const raw = await readEventsAll(dir);
         const events = raw.map((e) => redactEvent(e, mask));
 
         fs.mkdirSync(outDir, { recursive: true });
@@ -259,7 +244,7 @@ export function registerLogCommands(program: Command): void {
           opts: { from?: number; to?: number; delay: number; dryRun?: boolean; continueOnError?: boolean },
         ) => {
           const { name, dir } = resolveSession(session);
-          const cmds = readEvents(dir)
+          const cmds = (await readEventsAll(dir))
             .filter((e): e is CommandEvent => e.type === 'command' && e.ok && REPLAY_CMDS.has(e.cmd))
             .filter((e) => (opts.from == null || e.seq >= opts.from) && (opts.to == null || e.seq <= opts.to));
           if (!cmds.length) throw new Error('再実行できるコマンドがありません(観測系のみのセッション、または --from/--to の範囲外)');
