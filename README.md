@@ -334,7 +334,9 @@ State lives in `~/.kb/` (daemon.json / proxies.json / profiles/ / downloads/ / d
 ## Development
 
 ```bash
-npm test    # build + unit tests (node:test)
+npm test        # build + unit tests (node:test, no browser required)
+npm run test:e2e  # build + browser e2e smoke (spawns a real daemon in an isolated KB_HOME; auto-skips if no browser)
+npm run test:all  # both
 ```
 
 ## License
