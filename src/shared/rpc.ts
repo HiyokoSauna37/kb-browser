@@ -195,3 +195,21 @@ export type RpcArgs<C extends RpcCommand> = z.infer<(typeof rpcSchemas)[C]>;
 export function isRpcCommand(cmd: string): cmd is RpcCommand {
   return Object.prototype.hasOwnProperty.call(rpcSchemas, cmd);
 }
+
+// ---- コマンドのカテゴリ(名前の隣に置いて typo をコンパイルエラーにする) ----
+
+/** 操作ジャーナルに記録しない読み取り系・ログ操作系コマンド(daemon が dispatch をラップする際に除外)。 */
+export const JOURNAL_EXCLUDE: ReadonlySet<RpcCommand> = new Set<RpcCommand>([
+  'daemon.status', 'daemon.stop',
+  'tabs.list', 'downloads.list', 'cookies.list', 'storage.dump',
+  'net.log', 'net.body', 'net.headers', 'net.rules', 'net.har.status',
+  'console.log', 'proxy.status', 'proxy.test',
+  'log.start', 'log.stop', 'log.status',
+  'dialog.info',
+]);
+
+/** 自動スクリーンショット(kb log start --shots)の対象になる操作コマンド。 */
+export const AUTO_SHOT_CMDS: ReadonlySet<RpcCommand> = new Set<RpcCommand>([
+  'open', 'click', 'fill', 'press', 'hover', 'check', 'select', 'upload', 'scroll',
+  'back', 'forward', 'reload', 'dialog.respond',
+]);
