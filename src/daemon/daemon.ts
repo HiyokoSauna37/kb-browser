@@ -63,6 +63,10 @@ export interface DaemonConfig {
   stealth: boolean;
   ignoreHttpsErrors: boolean;
   extensions?: string[];
+  /** タブ分離ホットキーのキーコンボ(例 "Alt+Shift+D")。未指定で無効。 */
+  detachKey?: string;
+  /** 翻訳トグルホットキーのキーコンボ(例 "Alt+Shift+T")。未指定で無効。 */
+  translateKey?: string;
   /** アイドル自動終了の閾値(ms)。0 で無効。 */
   idleMs: number;
   /** status 表示用の閾値(秒。0 = 無効)。 */
@@ -96,6 +100,8 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): DaemonConfig 
     stealth: argv.includes('--stealth'),
     ignoreHttpsErrors: argv.includes('--ignore-https-errors'),
     extensions: extensionsArg == null ? undefined : splitExtensionsArg(extensionsArg),
+    detachKey: argValue('--detach-key') || undefined,
+    translateKey: argValue('--translate-key') || undefined,
     idleMs,
     idleTimeoutSec,
     idleLastRunSec: idleArgSec != null && idleArgSec !== '' ? idleTimeoutSec : undefined,
@@ -158,6 +164,8 @@ export class Daemon {
       cdpUrl: config.cdpUrl,
       stealth: config.stealth,
       extensions: config.extensions,
+      detachKey: config.detachKey,
+      translateKey: config.translateKey,
       ignoreHttpsErrors: config.ignoreHttpsErrors,
       ignoreCertErrorsSpkiList: caSpkiList,
       // アタッチ先ブラウザのプロキシは変更できないため、通常起動時のみ中継を向ける
@@ -319,6 +327,7 @@ export class Daemon {
       'tabs.list': () => host.listTabs(),
       'tabs.close': (a) => host.closeTab(a.tab),
       'tabs.activate': (a) => host.activateTab(a.tab),
+      'tabs.detach': (a) => host.detachTabs(a.tabs),
       'screenshot': (a) =>
         host.screenshot(
           a.path,
@@ -326,6 +335,7 @@ export class Daemon {
           a.tab,
         ),
       'text': (a) => host.text(a.tab, { maxChars: a.maxChars, offset: a.offset }),
+      'translate': (a) => host.translate({ to: a.to, from: a.from, inPlace: a.inPlace, restore: a.restore, toggle: a.toggle, tab: a.tab, maxChars: a.maxChars, offset: a.offset }),
       'html': (a) => host.html(a.tab, { maxChars: a.maxChars, offset: a.offset }),
       'snapshot': (a) => host.snapshot(a.tab, { maxChars: a.maxChars, offset: a.offset }),
       'eval': (a) => host.eval(a.expression, a.tab, { maxChars: a.maxChars, offset: a.offset }),
@@ -471,6 +481,8 @@ export class Daemon {
       stealth: config.stealth,
       idleTimeoutSec: config.idleLastRunSec,
       extensions: config.extensions,
+      detachKey: config.detachKey,
+      translateKey: config.translateKey,
       ignoreHttpsErrors: config.ignoreHttpsErrors,
     });
   }

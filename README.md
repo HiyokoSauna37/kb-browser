@@ -10,7 +10,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3ddc97.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A518-3ddc97.svg" alt="Node >= 18">
   <img src="https://img.shields.io/badge/Playwright-Chromium-2a3244.svg" alt="Playwright + Chromium">
-  <img src="https://img.shields.io/badge/MCP-24%20tools-2a3244.svg" alt="MCP · 24 tools">
+  <img src="https://img.shields.io/badge/MCP-26%20tools-2a3244.svg" alt="MCP · 26 tools">
 </p>
 
 日本語版は [README.ja.md](README.ja.md) を参照してください。
@@ -18,13 +18,15 @@
 Everything a GUI browser gives you — page rendering, cookie management, DevTools operations (Network / Console / Elements) — is available as `kb` commands. FoxyProxy-style proxy profiles are built in, with **restart-free switching** and per-host routing rules. Designed to be driven by AI agents (Claude Code, etc.) via Bash or MCP, while the window is a real Chrome you can use by hand at any time.
 
 > **Two workflows it's built for:**
-> - **Drive it from an AI agent** — Claude Code and other agents operate kb over **MCP (24 tools)** or **Bash** (every command supports `--json`). The accessibility-snapshot + `--ref` loop is tuned for reliable, low-token automation, and the resident daemon returns each step in tens of milliseconds.
+> - **Drive it from an AI agent** — Claude Code and other agents operate kb over **MCP (26 tools)** or **Bash** (every command supports `--json`). The accessibility-snapshot + `--ref` loop is tuned for reliable, low-token automation, and the resident daemon returns each step in tens of milliseconds.
 > - **Security research & bug-bounty recon** (authorized testing only) — session-shared HTTP, live network inspection/mocking, raw `eval` on authenticated SPAs, proxy chaining into Burp/Caido, two-account IDOR via profiles, and masked, shareable evidence bundles. See [Security research & bug-bounty recon](#security-research--bug-bounty-recon).
 
 ## Features
 
 - **Daemon architecture** — the browser stays resident; every CLI command returns in tens of milliseconds
-- **Real Chrome** — uses your installed Chrome/Edge (DRM works), falling back to bundled Chromium; pick explicitly with `--channel`, override the User-Agent with `--ua`, or present as a regular (non-automation) browser with `--stealth` for authorized testing
+- **Real Chrome, presents as a normal browser** — uses your installed Chrome/Edge (DRM works), falling back to bundled Chromium; pick explicitly with `--channel` or override the User-Agent with `--ua`. **Stealth is on by default** (`navigator.webdriver` hidden, so sites like Cloudflare don't flag it as an automated browser); disable with `--no-stealth`. Hard challenges (Cloudflare Turnstile / Managed Challenge) still need the solve-once-and-persist path — see [Getting past bot checks](#getting-past-bot-checks)
+- **Pop a tab into its own window** — `kb tabs detach <id...>` moves one or more tabs into a single new window (or bind a key with `--detach-key`). See [Detaching tabs](#detaching-tabs)
+- **Translate the page** — `kb translate` rewrites the page in place like Chrome's "Translate this page" (`--toggle` flips translation ⇄ original, `--text` just prints it, `--translate-key` binds a key). See [Translating a page](#translating-a-page)
 - **Attach to a running browser** — `kb daemon start --cdp http://127.0.0.1:9222` connects to a Chrome/Edge started with `--remote-debugging-port` and reuses its signed-in state
 - **Chrome extensions** — `kb daemon start --extensions <dir,...>` loads unpacked extensions (`on` enables extensions already installed in the profile, `off` turns it back off). See [Chrome extensions](#chrome-extensions)
 - **Agent-optimized** — `kb snapshot` returns an accessibility tree with element refs; `kb click --ref e12` acts on them reliably (including inside iframes), and stale refs are **auto re-resolved** to the element with the same role/name after re-renders. Long outputs (text / html / snapshot) are capped at 20,000 chars by default with `--offset` paging. `kb eval` accepts `await` and multi-line code as-is
@@ -35,7 +37,7 @@ Everything a GUI browser gives you — page rendering, cookie management, DevToo
 - **Persistent sign-in** — log in once and the state is kept in the profile across sessions; `kb login` wraps the manual sign-in flow in one command, `kb storage dump / restore` exports it to a file
 - **Operation recording** — commands, network, and console are journaled by default; `kb log export` produces a self-contained bundle (report + reproduction steps + standalone curl + screenshots) with sensitive values masked by default
 - **Human-in-the-loop** — the agent automates, you take over for logins/CAPTCHAs, `kb wait` detects when you're done
-- **MCP server** — `kb-mcp` exposes 24 tools (screenshots are returned as images)
+- **MCP server** — `kb-mcp` exposes 26 tools (screenshots are returned as images)
 - **`--json` everywhere** — machine-readable output for scripting and agents
 
 ## Install
@@ -65,8 +67,8 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 
 | Category | Commands |
 |---|---|
-| Daemon | `kb daemon start [--headless] [--profile <n>] [--channel chrome\|msedge\|chromium] [--ua <s>] [--stealth] [--extensions <dirs\|on\|off>] [--cdp <url>] / stop / status` |
-| Pages | `kb open <url> [-n] [--wait idle]` / `kb tabs [close/switch <id>]` / `kb text` / `kb html` / `kb snapshot` / `kb screenshot [<sel>\|--ref e12] [-f] [--timeout <sec>]` (element-level supported) / `kb pdf` (headless only) |
+| Daemon | `kb daemon start [--headless] [--profile <n>] [--channel chrome\|msedge\|chromium] [--ua <s>] [--no-stealth] [--detach-key [combo]] [--translate-key [combo]] [--extensions <dirs\|on\|off>] [--cdp <url>] / stop / status` (stealth is on by default) |
+| Pages | `kb open <url> [-n] [--wait idle]` / `kb tabs [close/switch <id> / detach <id...>]` / `kb text` / `kb translate [--to ja] [--restore\|--toggle\|--text]` / `kb html` / `kb snapshot` / `kb screenshot [<sel>\|--ref e12] [-f] [--timeout <sec>]` (element-level supported) / `kb pdf` (headless only) |
 | Navigation | `kb back` / `kb forward` / `kb reload` / `kb scroll [--to <sel>/--bottom]` |
 | Interaction | `kb click` / `kb fill` / `kb select [--label]` / `kb check` / `kb uncheck` / `kb hover` / `kb upload <sel> <local file path...>` / `kb press <key>` / `kb eval <js> [--file f.js]` (`await` & multi-line OK; returns the last expression) — target via CSS selector, `--ref e12` (from snapshot), or `--frame <sel>` (inside iframe) |
 | Dialogs | `kb dialog [show]` / `kb dialog accept [text]` / `kb dialog dismiss` / `kb dialog policy [hold\|accept\|dismiss]` (hold `alert`/`confirm`/`prompt`, then respond; default `hold`) |
@@ -112,6 +114,59 @@ kb dialog policy hold      # back to the default (hold and wait)
 ```
 
 > Previously Playwright's default dismissed dialogs immediately, making buttons that trigger a `confirm` look like they "did nothing". `hold` fixes this — the dialog is shown to a human and you choose the response.
+
+## Translating a page
+
+Translate the page's text like Chrome's built-in "Translate this page". By default it rewrites the visible text **in place** (layout preserved) and remembers the originals so you can flip back:
+
+```bash
+kb translate                 # translate the page to Japanese in place (--to ja by default)
+kb translate --restore       # put the original text back
+kb translate --toggle        # flip between translation and original (re-uses the cached translation)
+kb translate --to en         # translate to a different language
+kb translate --text          # don't touch the page — just print the translated text (for reading/agents)
+```
+
+Bind a key so you can flip translation ⇄ original in the window with one keystroke:
+
+```bash
+kb daemon start --translate-key            # default combo Alt+Shift+T (toggles translate ⇄ original)
+kb daemon start --translate-key "Ctrl+J"   # pick your own combo; "off" to disable
+```
+
+Single-page apps are handled too: when the site swaps its content without a real page load (soft navigation), `kb translate` / the toggle key notice that the page has effectively changed and translate the new content instead of flipping a stale cache. Repeated text (menus, headers) is cached daemon-wide, so browsing across many pages of the same site only translates what's new.
+
+Translation uses Google's free public endpoint (no key), sent through the browser's proxy. It's unofficial, so very large pages may hit rate limits (kb caps requests, retries once on a rate-limit response, and tells you if part of the page was left untranslated). For a proper API key / provider, `kb translate --text` output can also be piped elsewhere.
+
+## Detaching tabs
+
+Pop one or more tabs into a **single new window** — useful for side-by-side viewing:
+
+```bash
+kb tabs detach 3             # move tab 3 into its own new window
+kb tabs detach 2 3 5         # move tabs 2, 3, 5 together into one new window
+```
+
+Or bind a key to detach the focused tab while you work in the window:
+
+```bash
+kb daemon start --detach-key            # default combo Alt+Shift+D
+kb daemon start --detach-key "Ctrl+Shift+O"   # pick your own; "off" to disable
+```
+
+> Chromium's CDP has no API to *move* an existing tab between windows, so kb re-opens each tab at its current URL in the new window and closes the original. **Only the URL carries over** — in-page JS state, form input, scroll position, and history are not preserved. The key-bound version injects a small page-world listener, so leave it off (`--detach-key off`, the default) when doing strict stealth browsing.
+
+## Getting past bot checks
+
+kb presents as a **normal (non-automation) browser by default** — `navigator.webdriver` is hidden via `--disable-blink-features=AutomationControlled`, using your real Chrome/Edge when available. That clears the common "you look like a bot" checks (Cloudflare Bot Fight Mode, basic JS challenges). Disable it with `--no-stealth` if you specifically want to test bot handling.
+
+What kb **can't** win from the client side: TLS/JA3 & HTTP-2 fingerprints, IP reputation, the CDP `Runtime.enable` leak, and interactive **Cloudflare Turnstile / Managed Challenge** CAPTCHAs. For those, solve it once by hand and let the pass cookie (`cf_clearance`) persist in the profile:
+
+```bash
+kb login example.com --until-gone "iframe[src*='challenges.cloudflare.com']"   # solve the challenge → it's remembered
+# or attach to a real Chrome you drive yourself:
+kb daemon start --cdp http://127.0.0.1:9222
+```
 
 ## Staying signed in
 
@@ -293,7 +348,7 @@ When a connection fails (the browser shows `ERR_TUNNEL_CONNECTION_FAILED`), `kb 
 claude mcp add kb -- kb-mcp
 ```
 
-Exposes `kb_snapshot`, `kb_open`, `kb_text`, `kb_screenshot` (returns an image), `kb_click`, `kb_fill`, `kb_select`, `kb_eval`, `kb_dialog` (respond to alert/confirm/prompt), `kb_request`, `kb_net_log`, `kb_net_body`, `kb_net_headers`, `kb_proxy_use`, and more — 24 tools.
+Exposes `kb_snapshot`, `kb_open`, `kb_text`, `kb_translate` (translate the page), `kb_screenshot` (returns an image), `kb_click`, `kb_fill`, `kb_select`, `kb_eval`, `kb_dialog` (respond to alert/confirm/prompt), `kb_tabs_detach` (pop tabs into a new window), `kb_request`, `kb_net_log`, `kb_net_body`, `kb_net_headers`, `kb_proxy_use`, and more — 26 tools.
 
 **Via Bash** everything is available too (every command supports `--json`, with symmetric `{ok:true,result}` / `{ok:false,error}`). The recommended loop:
 

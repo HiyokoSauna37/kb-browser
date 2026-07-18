@@ -39,6 +39,19 @@ export interface HostOptions {
    * 自前起動時のみ有効。
    */
   extensions?: string[];
+  /**
+   * ヘッド有りウィンドウで、このキーコンボ(例 "Alt+Shift+D")を押すと現在のタブを別ウィンドウへ
+   * 分離するホットキー。全タブに init script でキーリスナーを仕込み、exposeBinding 経由で
+   * デーモンの detachTabs を呼ぶ。opt-in(未指定で無効)。自前起動時のみ有効(アタッチ先の
+   * ユーザーブラウザには注入しない)。
+   */
+  detachKey?: string;
+  /**
+   * ヘッド有りウィンドウで、このキーコンボ(例 "Alt+Shift+T")を押すと現在のタブの本文を日本語へ
+   * in-place 翻訳し、もう一度押すと原文へ戻す(翻訳 ⇄ 原文 のトグル)。detachKey と同じく opt-in・
+   * 自前起動時のみ有効。
+   */
+  translateKey?: string;
 }
 
 export interface TabInfo {

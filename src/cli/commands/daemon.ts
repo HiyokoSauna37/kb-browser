@@ -4,7 +4,7 @@ import type { Command } from 'commander';
 import { KB_HOME, PROFILES_DIR, readDiskBuildId, removeDaemonInfo } from '../../shared/paths';
 import { pingDaemon, releaseSpawnLock, rpcRaw, spawnDaemon, waitForDaemon, waitForPidDeath } from '../../shared/client';
 import { findOwnedDaemons, killTree, listProcesses } from '../../daemon/procscan';
-import { splitExtensionsArg } from '../../shared/util';
+import { parseHotkey, splitExtensionsArg } from '../../shared/util';
 import { print, run } from '../output';
 
 /**
@@ -38,13 +38,16 @@ export function registerDaemonCommands(program: Command): void {
     .option('--profile <name>', 'ブラウザプロファイル')
     .option('--channel <channel>', '起動チャネルを明示する (chrome | msedge | chromium。"auto" で自動選択に戻す)')
     .option('--ua <string>', 'User-Agent を全タブで上書きする(headless の "HeadlessChrome" 対策)。--ua "" で解除')
-    .option('--stealth', 'ステルスモード: navigator.webdriver を消す等、自動化の痕跡を実 Chrome 相当に均す(認可テスト向け。JA3/IP 等のサーバ側判定は別レイヤなので突破は保証しない)')
+    .option('--stealth', 'ステルスモード(既定 ON): navigator.webdriver を消す等、自動化の痕跡を実ブラウザ相当に均し、Cloudflare 等のボット判定に弾かれにくくする。既定 ON のため通常は指定不要')
+    .option('--no-stealth', 'ステルスモードを無効化する(navigator.webdriver=true のまま。ボット挙動そのものをテストしたいとき用)')
+    .option('--detach-key [combo]', 'ヘッド有りウィンドウでこのキーを押すと現在のタブを別ウィンドウへ分離する(例 "Alt+Shift+D"。値を省略すると Alt+Shift+D)。"off" で無効化。opt-in(既定は無効)')
+    .option('--translate-key [combo]', 'ヘッド有りウィンドウでこのキーを押すと現在タブの本文を日本語へ翻訳し、もう一度押すと原文へ戻す(例 "Alt+Shift+T"。値を省略すると Alt+Shift+T)。"off" で無効化。opt-in(既定は無効)')
     .option('--ignore-https-errors', 'HTTPS 証明書エラーを無視する(自己署名証明書や、CA を信頼させていない MITM デバッグプロキシの escape hatch)')
     .option('--extensions <dirs|on|off>', 'Chrome 拡張機能を有効化する。カンマ区切りの解凍済み拡張ディレクトリを読み込む(同梱 Chromium で起動)。"on" は有効化のみ(プロファイルにインストール済みの拡張を使う)、"off" で無効に戻す')
     .option('--cdp <url>', '起動済みブラウザにアタッチする (例: http://127.0.0.1:9222)。--remote-debugging-port 付きで起動した Chrome/Edge に接続し、そのサインイン状態をそのまま使う')
     .option('--idle-timeout <min>', 'この分数だけ無活動(RPC もページ操作もなし)が続いたら自動終了する。0 で無効。既定 30 分', parseFloat)
     .action(
-      run(async (opts: { headless?: boolean; headed?: boolean; profile?: string; channel?: string; ua?: string; stealth?: boolean; ignoreHttpsErrors?: boolean; extensions?: string; cdp?: string; idleTimeout?: number }) => {
+      run(async (opts: { headless?: boolean; headed?: boolean; profile?: string; channel?: string; ua?: string; stealth?: boolean; detachKey?: string | boolean; translateKey?: string | boolean; ignoreHttpsErrors?: boolean; extensions?: string; cdp?: string; idleTimeout?: number }, command: Command) => {
         if (opts.headless && opts.headed) throw new Error('--headless と --headed は同時に指定できません');
         if (opts.idleTimeout != null && (!Number.isFinite(opts.idleTimeout) || opts.idleTimeout < 0)) {
           throw new Error('--idle-timeout は 0 以上の分数で指定してください(0 で無効)');
@@ -52,8 +55,31 @@ export function registerDaemonCommands(program: Command): void {
         if (opts.channel && !['chrome', 'msedge', 'chromium', 'auto'].includes(opts.channel)) {
           throw new Error('--channel は chrome | msedge | chromium | auto を指定してください');
         }
-        if (opts.cdp && (opts.channel || opts.ua != null || opts.profile || opts.headless || opts.headed || opts.stealth || opts.ignoreHttpsErrors || opts.extensions != null)) {
-          throw new Error('--cdp(アタッチ)は接続先ブラウザの起動条件を変更できないため、--channel / --ua / --profile / --headless / --stealth / --ignore-https-errors / --extensions とは併用できません(アタッチ先のブラウザに直接インストールされた拡張はそのまま使えます)');
+        // stealth は既定 ON。opts.stealth は --stealth で true / --no-stealth で false / 未指定で undefined。
+        // 明示指定(--stealth / --no-stealth のどちらか)だったかは getOptionValueSource で判別する。
+        const stealthExplicit = command.getOptionValueSource('stealth') === 'cli';
+        const stealth = opts.stealth ?? true;
+        // detach-key の解決: 値なし = 既定コンボ、"off" = 無効化、それ以外はコンボ文字列(不正なら起動前に弾く)
+        let detachKey: string | 'off' | undefined;
+        if (opts.detachKey !== undefined) {
+          if (opts.detachKey === 'off') detachKey = 'off';
+          else {
+            const combo = opts.detachKey === true ? 'Alt+Shift+D' : String(opts.detachKey);
+            parseHotkey(combo);
+            detachKey = combo;
+          }
+        }
+        let translateKey: string | 'off' | undefined;
+        if (opts.translateKey !== undefined) {
+          if (opts.translateKey === 'off') translateKey = 'off';
+          else {
+            const combo = opts.translateKey === true ? 'Alt+Shift+T' : String(opts.translateKey);
+            parseHotkey(combo);
+            translateKey = combo;
+          }
+        }
+        if (opts.cdp && (opts.channel || opts.ua != null || opts.profile || opts.headless || opts.headed || (stealthExplicit && stealth) || opts.ignoreHttpsErrors || opts.extensions != null || opts.detachKey != null || opts.translateKey != null)) {
+          throw new Error('--cdp(アタッチ)は接続先ブラウザの起動条件を変更できないため、--channel / --ua / --profile / --headless / --stealth / --ignore-https-errors / --extensions / --detach-key / --translate-key とは併用できません(アタッチ先のブラウザに直接インストールされた拡張はそのまま使えます)');
         }
         const extensions = opts.extensions != null ? resolveExtensionsOption(opts.extensions) : undefined;
         // Chrome 137+ の stable は --load-extension を無視する(サイドロード対策で削除)。
@@ -69,7 +95,10 @@ export function registerDaemonCommands(program: Command): void {
           // 黙って握りつぶさず、再起動が要る旨を伝える(特に --stealth は安全性に関わるため)。
           const status = await rpcRaw(running, 'daemon.status');
           const wants: string[] = [];
-          if (opts.stealth && !status.stealth) wants.push('stealth');
+          if (stealthExplicit && stealth && !status.stealth) wants.push('stealth');
+          if (stealthExplicit && !stealth && status.stealth) wants.push('no-stealth');
+          if (detachKey != null && (status.detachKey ?? undefined) !== (detachKey === 'off' ? undefined : detachKey)) wants.push('detach-key');
+          if (translateKey != null && (status.translateKey ?? undefined) !== (translateKey === 'off' ? undefined : translateKey)) wants.push('translate-key');
           if (opts.ignoreHttpsErrors && !status.ignoreHttpsErrors) wants.push('ignore-https-errors');
           if (opts.headless && !status.headless) wants.push('headless');
           if (opts.profile && opts.profile !== status.profile) wants.push(`profile=${opts.profile}`);
@@ -93,19 +122,23 @@ export function registerDaemonCommands(program: Command): void {
           // 明示起動は「フラグなし = headed / stealth off」の契約を守る(last-run を継承するのは自動 spawn のみ)。
           // --idle-timeout は分指定なので秒に変換して渡す(未指定なら last-run 継承 → デーモン側の env/既定)。
           const idleTimeoutSec = opts.idleTimeout != null ? Math.round(opts.idleTimeout * 60) : undefined;
-          const child = spawnDaemon({ headless: !!opts.headless, profile: opts.profile, channel: opts.channel, userAgent: opts.ua, stealth: !!opts.stealth, ignoreHttpsErrors: !!opts.ignoreHttpsErrors, extensions, cdpUrl: opts.cdp, idleTimeoutSec });
+          const child = spawnDaemon({ headless: !!opts.headless, profile: opts.profile, channel: opts.channel, userAgent: opts.ua, stealth: opts.cdp ? false : stealth, ignoreHttpsErrors: !!opts.ignoreHttpsErrors, extensions, detachKey, translateKey, cdpUrl: opts.cdp, idleTimeoutSec });
           // child を渡すと、起動に失敗して即終了した場合に 30 秒待たずエラーになる
           const info = await waitForDaemon(child);
           const status = await rpcRaw(info, 'daemon.status');
           // ステルス + headless では UA に "HeadlessChrome" が残り最大の綻びになる。--ua か headed を促す
           // (--ua "" は既定 UA へのリセット = HeadlessChrome が残るので、これも警告対象にする)
-          if (opts.stealth && status.headless && !opts.ua) {
+          if (status.stealth && status.headless && !opts.ua) {
             console.error('kb: stealth + headless では UA に "HeadlessChrome" が残ります(JS で読める綻び)。--ua "<実Chromeの UA>" を渡すか headed を使ってください。');
+          }
+          // 同梱 Chromium は実 Chrome より検知されやすい。ステルス目的で実 Chrome/Edge が無くフォールバックしたら促す。
+          if (status.stealth && !status.attached && /chromium/i.test(String(status.channel))) {
+            console.error('kb: 実 Chrome/Edge が見つからず同梱 Chromium で起動しました。Cloudflare 等の厳しめのボット判定を通すには Chrome か Edge をインストールしてください(同梱 Chromium は検知されやすい)。');
           }
           print(status, (s) =>
             s.attached
               ? `起動しました (pid=${s.pid}, attach=${s.attached}, tabs=${s.tabs})`
-              : `起動しました (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}${s.stealth ? ', stealth=on' : ''}${s.ignoreHttpsErrors ? ', ignore-https-errors=on' : ''}${s.extensions ? `, extensions=${s.extensions.length || 'on'}` : ''})`,
+              : `起動しました (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}${s.stealth ? ', stealth=on' : ', stealth=off'}${s.detachKey ? `, detach-key=${s.detachKey}` : ''}${s.translateKey ? `, translate-key=${s.translateKey}` : ''}${s.ignoreHttpsErrors ? ', ignore-https-errors=on' : ''}${s.extensions ? `, extensions=${s.extensions.length || 'on'}` : ''})`,
           );
         } finally {
           releaseSpawnLock();
@@ -230,7 +263,10 @@ export function registerDaemonCommands(program: Command): void {
                 : `, build=MISMATCH (running=${build.running} / disk=${build.disk} — kb daemon stop で新コードが反映されます)`;
           const idleNote = s.idleTimeoutSec ? `, idle=${s.idleTimeoutSec}s` : ', idle=off';
           const extNote = s.extensions ? `, extensions=${s.extensions.length || 'on'}` : '';
-          return `running (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}, tabs=${s.tabs}, proxy=${s.proxy}${s.stealth ? ', stealth=on' : ''}${s.ignoreHttpsErrors ? ', ignore-https-errors=on' : ''}${extNote}${s.attached ? `, attach=${s.attached}` : ''}${idleNote}${buildNote})`;
+          const detachNote = s.detachKey ? `, detach-key=${s.detachKey}` : '';
+          const transKeyNote = s.translateKey ? `, translate-key=${s.translateKey}` : '';
+          const stealthNote = s.attached ? '' : s.stealth ? ', stealth=on' : ', stealth=off';
+          return `running (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}, tabs=${s.tabs}, proxy=${s.proxy}${stealthNote}${s.ignoreHttpsErrors ? ', ignore-https-errors=on' : ''}${extNote}${detachNote}${transKeyNote}${s.attached ? `, attach=${s.attached}` : ''}${idleNote}${buildNote})`;
         });
       }),
     );

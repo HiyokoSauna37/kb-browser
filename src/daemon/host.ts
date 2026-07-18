@@ -1,10 +1,11 @@
 import { type Browser, type BrowserContext, type Page } from 'playwright';
-import { clip, LogBuffer, normalizeUrl, prepareEval } from '../shared/util';
+import { clip, LogBuffer, normalizeUrl, parseHotkey, prepareEval } from '../shared/util';
 import { Emulator } from './emulation';
 import { DialogManager } from './host/dialogs';
 import { DownloadManager } from './host/downloads';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from './host/httpClient';
 import { attachOverCdp, launchOwned } from './host/launcher';
+import { translateSegments } from './host/translate';
 import { TabRegistry } from './host/tabs';
 import { NetMonitor } from './netMonitor';
 import { TargetResolver } from './targets';
@@ -116,6 +117,24 @@ export class BrowserHost {
 
     // block / mock ルールは context 単位なので再起動時に引き継ぐ
     await this.net.reapplyRoutes(this.context);
+
+    // ホットキー(opt-in)。context を作り直す再起動でも毎回貼り直す。
+    // アタッチ先(ユーザーの実ブラウザ)には注入しない。
+    if (!this.attached) {
+      if (opts.detachKey) {
+        await this.installHotkey('__kbDetachTab', opts.detachKey, async (page) => {
+          const id = this.tabs.find(page);
+          if (id != null) await this.detachTabs([id]);
+        });
+      }
+      if (opts.translateKey) {
+        // キーで 翻訳 ⇄ 原文 をトグルする(1 回目=日本語化、2 回目=原文へ戻す。再翻訳はキャッシュ)
+        await this.installHotkey('__kbTranslate', opts.translateKey, async (page) => {
+          const id = this.tabs.find(page);
+          if (id != null) await this.translate({ toggle: true, to: 'ja', tab: id });
+        });
+      }
+    }
   }
 
   /** アタッチモードでは使えない操作のガード。 */
@@ -323,6 +342,98 @@ export class BrowserHost {
     this.tabs.active = id;
   }
 
+  /**
+   * 指定タブ(複数可)を新しい 1 枚のウィンドウへ分離する。
+   *
+   * CDP には既存タブを別ウィンドウへ「移動」する API がないため、各タブの現在 URL で
+   * 新ウィンドウにタブを作り直し(先頭を `Target.createTarget({newWindow:true})`、
+   * 以降は新ウィンドウをアクティブにしてから `createTarget` = 同ウィンドウにタブ追加)、
+   * 元タブを閉じる。ページ内 JS 状態・履歴・スクロール位置・フォーム入力は引き継がれない
+   * (URL のみ)。about:blank / 空 URL のタブは about:blank として作り直す。
+   */
+  async detachTabs(
+    tabIds: number[],
+  ): Promise<{ tabs: TabInfo[]; detached: { from: number; to: number; url: string }[] }> {
+    const uniq = [...new Set(tabIds)];
+    if (!uniq.length) throw new Error('分離するタブ ID を 1 つ以上指定してください。');
+    const items = uniq.map((id) => {
+      const page = this.tabs.get(id);
+      if (!page) throw new Error(`タブ ${id} は存在しません。kb tabs で確認してください。`);
+      return { id, page, url: page.url() };
+    });
+    const browser = this.context.browser();
+    if (!browser) {
+      throw new Error('この構成ではタブを別ウィンドウへ分離できません(ブラウザ CDP セッションを取得できませんでした)。');
+    }
+    const cdp = await browser.newBrowserCDPSession();
+    try {
+      let lastTargetId: string | undefined;
+      const created: { page: Page; from: number; url: string }[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const url = items[i].url;
+        const openUrl = url && url !== 'about:blank' && !url.startsWith('about:') ? url : 'about:blank';
+        // 2 枚目以降は直前に作った新ウィンドウのタブをアクティブにしてから createTarget することで、
+        // newWindow を付けずとも同じ(新)ウィンドウにタブとして追加される。
+        if (i > 0 && lastTargetId) {
+          await cdp.send('Target.activateTarget', { targetId: lastTargetId }).catch(() => {});
+        }
+        const [page, res] = await Promise.all([
+          this.context.waitForEvent('page', { timeout: 15_000 }),
+          cdp.send('Target.createTarget', { url: openUrl, newWindow: i === 0 }) as Promise<{ targetId: string }>,
+        ]);
+        lastTargetId = res.targetId;
+        created.push({ page, from: items[i].id, url: openUrl });
+      }
+      // 新しいタブは context 'page' で既に registerTab 済みだが、id を確定させるため冪等に呼ぶ
+      const detached = created.map((c) => ({ from: c.from, to: this.registerTab(c.page), url: c.url }));
+      // 新ウィンドウを用意してから元タブを閉じる(全タブ分離でも常に 1 枚は生き、デーモンは落ちない)
+      for (const { page } of items) await page.close().catch(() => {});
+      if (detached.length) this.tabs.active = detached[0].to;
+      return { tabs: await this.listTabs(), detached };
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+  }
+
+  /**
+   * ヘッド有りウィンドウ向けのホットキーを全タブへ仕込む(--detach-key / --translate-key)。当該キーを押すと
+   * `bindingName` の binding が呼ばれ `handler(page)` が走る。exposeBinding で押下をデーモンへ渡し、
+   * addInitScript で capture フェーズの keydown リスナーを全ページ(以後のナビゲーションを含む)へ注入する。
+   */
+  private async installHotkey(bindingName: string, combo: string, handler: (page: Page) => Promise<void>): Promise<void> {
+    const hk = parseHotkey(combo); // 不正コンボはここで投げる(起動失敗として扱う)
+    await this.context.exposeBinding(bindingName, async ({ page }) => {
+      await handler(page).catch(() => {});
+    });
+    await this.context.addInitScript(
+      (cfg: { name: string; h: { alt: boolean; ctrl: boolean; shift: boolean; meta: boolean; key: string } }) => {
+        window.addEventListener(
+          'keydown',
+          (e) => {
+            const h = cfg.h;
+            if (
+              e.altKey === h.alt &&
+              e.ctrlKey === h.ctrl &&
+              e.shiftKey === h.shift &&
+              e.metaKey === h.meta &&
+              e.key.toLowerCase() === h.key.toLowerCase()
+            ) {
+              e.preventDefault();
+              try {
+                // fire-and-forget(戻り値は待たない)
+                (window as unknown as Record<string, undefined | (() => Promise<void>)>)[cfg.name]?.();
+              } catch {
+                /* binding 未注入等は無視 */
+              }
+            }
+          },
+          true,
+        );
+      },
+      { name: bindingName, h: hk },
+    );
+  }
+
   /** スクリーンショット。selector / ref を指定すると要素単位で撮る。 */
   async screenshot(
     outPath: string,
@@ -348,6 +459,187 @@ export class BrowserHost {
     const raw = await page.evaluate(() => document.body?.innerText ?? '');
     const clipped = clip(raw, { maxChars: opts.maxChars ?? TEXT_CAP, offset: opts.offset });
     return { url: page.url(), title: await page.title().catch(() => ''), ...clipped };
+  }
+
+  /**
+   * ページ内容を翻訳する(Chrome の「このページを翻訳」相当)。
+   * - in-place(既定): 本文のテキストノードを走査して訳文で置換し、レイアウトを保ったまま翻訳する。
+   *   原文を `window.__kbTrans` に退避するので原文へ戻せる(restore)し、翻訳⇄原文をトグルできる(toggle)。
+   *   一度翻訳したページの再翻訳・復元はキャッシュを使い、ネットワークを叩き直さない。
+   * - text モード(inPlace:false): 置換せず、翻訳した本文テキストを返す(エージェントが外国語ページを読む用)。
+   * 翻訳は無料の gtx エンドポイント(host/translate.ts)を context.request 経由で叩く。
+   */
+  async translate(
+    opts: {
+      to?: string;
+      from?: string;
+      inPlace?: boolean;
+      restore?: boolean;
+      toggle?: boolean;
+      tab?: number;
+      maxChars?: number;
+      offset?: number;
+    } = {},
+  ): Promise<{
+    inPlace: boolean;
+    /** in-place 時の結果: 翻訳を適用した / 原文へ戻した / 対象なし。 */
+    action?: 'translated' | 'restored' | 'none';
+    to: string;
+    from: string;
+    detected?: string;
+    url: string;
+    title?: string;
+    segments?: number;
+    translated?: number;
+    /** 翻訳リクエスト上限に達し、一部セグメントが未翻訳のまま残った。 */
+    partial: boolean;
+    requests?: number;
+    text?: string;
+    totalChars?: number;
+    offset?: number;
+    /** text モードのページング用(clip の切り詰め)。 */
+    truncated?: boolean;
+  }> {
+    const { page } = this.getPage(opts.tab);
+    const to = opts.to || 'ja';
+    const from = opts.from || 'auto';
+    const inPlace = opts.inPlace !== false; // restore/toggle も in-place 系
+
+    if (inPlace) {
+      // ページ内の状態機械を 1 回の evaluate で実行する: 旧状態(__kbTrans)の生存確認 →
+      // restore / キャッシュ再適用 / 新規収集 のどれかを行う。
+      // SPA のソフト遷移(pushState 等)では window = __kbTrans が残ったまま DOM だけ入れ替わるため、
+      // 旧状態が現在の DOM をまだ代表しているか(ノードの生存 + 新ノード比率)を必ず突き合わせる。
+      // これを怠ると、切り離された旧ノードへの復元/再適用を空振りし続け「翻訳が効かなくなる」。
+      type Phase1 =
+        | { kind: 'restored'; restored: number; count: number; detected?: string }
+        | { kind: 'reapplied'; applied: number; count: number; detected?: string }
+        | { kind: 'fresh'; segments: string[] };
+      const p1 = (await page.evaluate(
+        (arg: { restore: boolean; toggle: boolean }) => {
+          type St = { nodes: Text[]; original: string[]; translated: (string | null)[]; shown: string; detected?: string };
+          const w = window as unknown as { __kbTrans?: St };
+          const skip = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'CODE', 'PRE']);
+          const collect = (): Text[] => {
+            const out: Text[] = [];
+            if (!document.body) return out;
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let n: Node | null;
+            while ((n = walker.nextNode())) {
+              const tn = n as Text;
+              if (!tn.nodeValue || !tn.nodeValue.trim()) continue;
+              const pe = tn.parentElement;
+              if (pe && skip.has(pe.tagName)) continue;
+              out.push(tn);
+            }
+            return out;
+          };
+          // 生きている(まだ DOM に繋がっている)ノードだけ原文へ戻す
+          const restoreLive = (st: St): number => {
+            let c = 0;
+            for (let i = 0; i < st.nodes.length; i++) {
+              if (st.original[i] != null && st.nodes[i].isConnected) {
+                st.nodes[i].nodeValue = st.original[i];
+                c++;
+              }
+            }
+            st.shown = 'original';
+            return c;
+          };
+          const cur = collect();
+          const st = w.__kbTrans;
+          // 「実質別ページ」判定: 旧ノード全滅、または現ノードの 1/3 以上が旧状態に無い新ノード
+          let changed = false;
+          if (st) {
+            const known = new Set<Text>(st.nodes);
+            const live = st.nodes.reduce((c, n) => c + (n.isConnected ? 1 : 0), 0);
+            const fresh = cur.reduce((c, n) => c + (known.has(n) ? 0 : 1), 0);
+            changed = live === 0 || fresh * 3 >= Math.max(1, cur.length);
+          }
+          // 別ページ扱いなら shown フラグは信用しない(見えているのは新ページの原文)
+          const shownNow = st && !changed ? st.shown : 'original';
+          if (arg.restore || (arg.toggle && shownNow === 'translated')) {
+            if (!st) return { kind: 'restored' as const, restored: 0, count: 0, detected: undefined as string | undefined };
+            return { kind: 'restored' as const, restored: restoreLive(st), count: st.nodes.length, detected: st.detected };
+          }
+          // トグルで「原文表示中 かつ 訳キャッシュ有り かつ ページが変わっていない」なら訳を再適用
+          if (arg.toggle && st && !changed && st.shown === 'original' && st.translated.some((t) => !!t)) {
+            let c = 0;
+            for (let i = 0; i < st.nodes.length; i++) {
+              const t = st.translated[i];
+              if (!t || !st.nodes[i].isConnected) continue;
+              const raw = st.original[i] ?? '';
+              const lead = /^\s*/.exec(raw)?.[0] ?? '';
+              const trail = /\s*$/.exec(raw)?.[0] ?? '';
+              st.nodes[i].nodeValue = lead + t + trail;
+              c++;
+            }
+            st.shown = 'translated';
+            return { kind: 'reapplied' as const, applied: c, count: st.nodes.length, detected: st.detected };
+          }
+          // 新規翻訳: 画面に旧訳が残っていれば先に原文へ戻す(訳文を「原文」として再収集しない)
+          if (st && st.shown === 'translated') restoreLive(st);
+          const original = cur.map((tn) => tn.nodeValue as string);
+          w.__kbTrans = { nodes: cur, original, translated: [], shown: 'original' };
+          return { kind: 'fresh' as const, segments: original };
+        },
+        { restore: !!opts.restore, toggle: !!opts.toggle },
+      )) as Phase1;
+
+      if (p1.kind === 'restored') {
+        return { inPlace: true, action: 'restored', to, from, detected: p1.detected, url: page.url(), translated: p1.restored, segments: p1.count, partial: false, requests: 0 };
+      }
+      if (p1.kind === 'reapplied') {
+        return { inPlace: true, action: 'translated', to, from, detected: p1.detected, url: page.url(), translated: p1.applied, segments: p1.count, partial: false, requests: 0 };
+      }
+      const segments = p1.segments;
+      if (!segments.length) {
+        return { inPlace: true, action: 'none', to, from, url: page.url(), segments: 0, translated: 0, partial: false, requests: 0 };
+      }
+      const { translations, detected, truncated, requests } = await translateSegments(this.context.request, segments, { to, from });
+      // 置換(前後の空白は元ノードのものを保ってインライン要素間の隙間を壊さない)+ 訳/検出言語をキャッシュ
+      const written: number = await page.evaluate((arg: { trans: (string | null)[]; detected?: string }) => {
+        const st = (window as unknown as { __kbTrans?: { nodes: Text[]; original: string[]; translated: (string | null)[]; shown: string; detected?: string } }).__kbTrans;
+        if (!st) return 0;
+        st.translated = arg.trans;
+        st.detected = arg.detected;
+        let count = 0;
+        for (let i = 0; i < st.nodes.length && i < arg.trans.length; i++) {
+          const t = arg.trans[i];
+          // 翻訳 API 往復の間にさらに遷移した場合、切り離されたノードへの書き込みは空振りなので数えない
+          if (!t || !st.nodes[i].isConnected) continue;
+          const raw = st.original[i] ?? '';
+          const lead = /^\s*/.exec(raw)?.[0] ?? '';
+          const trail = /\s*$/.exec(raw)?.[0] ?? '';
+          st.nodes[i].nodeValue = lead + t + trail;
+          count++;
+        }
+        st.shown = 'translated';
+        return count;
+      }, { trans: translations, detected });
+      return { inPlace: true, action: 'translated', to, from, detected, url: page.url(), segments: segments.length, translated: written, partial: truncated, requests };
+    }
+
+    // text モード: 本文 innerText を行単位で翻訳し、原文の空行/構造を保って返す
+    const raw = await page.evaluate(() => document.body?.innerText ?? '');
+    const lines = raw.split('\n');
+    const { translations, detected, truncated, requests } = await translateSegments(this.context.request, lines, { to, from });
+    const joined = lines.map((l, i) => (l.trim() ? translations[i] || l : l)).join('\n');
+    const clipped = clip(joined, { maxChars: opts.maxChars ?? TEXT_CAP, offset: opts.offset });
+    return {
+      inPlace: false,
+      to,
+      from,
+      detected,
+      url: page.url(),
+      title: await page.title().catch(() => ''),
+      partial: truncated,
+      truncated: clipped.truncated,
+      requests,
+      text: clipped.text,
+      totalChars: clipped.totalChars,
+      offset: clipped.offset,
+    };
   }
 
   async html(
@@ -842,6 +1134,8 @@ export class BrowserHost {
       ...(this.attached ? { attached: this.opts?.cdpUrl } : {}),
       ...(this.opts?.stealth ? { stealth: true } : {}),
       ...(this.opts?.extensions ? { extensions: this.opts.extensions } : {}),
+      ...(this.opts?.detachKey && !this.attached ? { detachKey: this.opts.detachKey } : {}),
+      ...(this.opts?.translateKey && !this.attached ? { translateKey: this.opts.translateKey } : {}),
       ...(this.opts?.ignoreHttpsErrors ? { ignoreHttpsErrors: true } : {}),
       ...(this.opts?.ignoreCertErrorsSpkiList?.length ? { trustedCaSpki: this.opts.ignoreCertErrorsSpkiList.length } : {}),
       ...(this.dialogs.pendingCount ? { pendingDialogs: this.dialogs.pendingTabs } : {}),

@@ -47,6 +47,10 @@ export interface LastRunOptions {
   idleTimeoutSec?: number;
   /** Chrome 拡張機能。空配列 = プロファイル拡張の有効化のみ、要素 = 未パック拡張の絶対パス。 */
   extensions?: string[];
+  /** タブ分離ホットキーのキーコンボ(例 "Alt+Shift+D")。自動 spawn が引き継ぐ。 */
+  detachKey?: string;
+  /** 翻訳トグルホットキーのキーコンボ(例 "Alt+Shift+T")。自動 spawn が引き継ぐ。 */
+  translateKey?: string;
   /** HTTPS 証明書エラーを無視する。自動 spawn が引き継ぐ。 */
   ignoreHttpsErrors?: boolean;
 }
@@ -111,6 +115,8 @@ export function readLastRun(): LastRunOptions | null {
       stealth: !!raw.stealth,
       idleTimeoutSec: typeof raw.idleTimeoutSec === 'number' ? raw.idleTimeoutSec : undefined,
       extensions: Array.isArray(raw.extensions) ? raw.extensions.filter((x) => typeof x === 'string') : undefined,
+      detachKey: typeof raw.detachKey === 'string' && raw.detachKey ? raw.detachKey : undefined,
+      translateKey: typeof raw.translateKey === 'string' && raw.translateKey ? raw.translateKey : undefined,
       ignoreHttpsErrors: !!raw.ignoreHttpsErrors,
     };
   } catch {

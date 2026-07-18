@@ -203,6 +203,28 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
     assert.equal(afterList.length, initial.length);
   });
 
+  test('tabs.detach: タブを新しいウィンドウへ分離する(旧 id は消え新 id が付く)', { timeout: 30_000 }, async () => {
+    const a = await rpc('open', { url: dataUrl('<title>detach-a</title><p>a</p>'), new: true });
+    const b = await rpc('open', { url: dataUrl('<title>detach-b</title><p>b</p>'), new: true });
+    const before = await rpc('tabs.list');
+    const r = await rpc('tabs.detach', { tabs: [a.tab, b.tab] });
+    // 旧 id → 新 id の対応が返る。URL は引き継がれ、新 id は元と別。
+    assert.equal(r.detached.length, 2);
+    assert.deepEqual(
+      r.detached.map((d: { from: number }) => d.from),
+      [a.tab, b.tab],
+    );
+    for (const d of r.detached) assert.notEqual(d.to, d.from);
+    // タブ総数は不変(作り直して元を閉じるため)。旧 id は消え、新 id が居る。
+    const after = await rpc('tabs.list');
+    assert.equal(after.length, before.length);
+    const ids = after.map((t: { id: number }) => t.id);
+    assert.ok(!ids.includes(a.tab) && !ids.includes(b.tab), '分離元の旧タブ id は消えるはず');
+    for (const d of r.detached) assert.ok(ids.includes(d.to), '分離先の新タブ id が一覧に居るはず');
+    // 後片付け(以降のテストのタブ数前提を汚さない)
+    for (const d of r.detached) await rpc('tabs.close', { tab: d.to });
+  });
+
   test('net.log + net.body capture fetch response', { timeout: 30_000 }, async () => {
     await rpc('open', { url: `${origin}/page.html` });
     // ページ内 fetch が捕捉されるまでポーリング

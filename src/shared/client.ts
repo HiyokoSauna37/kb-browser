@@ -153,6 +153,10 @@ export function spawnDaemon(
     idleTimeoutSec?: number;
     /** Chrome 拡張機能。空配列 = 有効化のみ、要素 = 未パック拡張の絶対パス。'off' は明示リセット(継承しない)。 */
     extensions?: string[] | 'off';
+    /** タブ分離ホットキー。キーコンボ = 有効、'off' は明示リセット(継承しない)、未指定は last-run 継承。 */
+    detachKey?: string | 'off';
+    /** 翻訳トグルホットキー。detachKey と同じ扱い。 */
+    translateKey?: string | 'off';
     /** HTTPS 証明書エラーを無視する。明示 start は concrete boolean、自動 spawn は undefined → last-run 継承。 */
     ignoreHttpsErrors?: boolean;
   } = {},
@@ -164,13 +168,17 @@ export function spawnDaemon(
     // "auto" / 空文字は「明示的に既定へ戻す」= last-run を継承しない
     channel: opts.channel === 'auto' ? undefined : (opts.channel ?? last?.channel),
     userAgent: opts.userAgent === '' ? undefined : (opts.userAgent ?? last?.userAgent),
-    // 明示 start は concrete な boolean を渡す(継承しない)。自動 spawn は undefined → last-run 継承。
-    stealth: opts.stealth ?? last?.stealth ?? false,
+    // 既定 ON: 実ブラウザ相当に見せて Cloudflare 等のボット判定に弾かれにくくする。
+    // 明示 start は concrete な boolean を渡す(--no-stealth で off)。自動 spawn は undefined → last-run 継承 → 既定 true。
+    stealth: opts.stealth ?? last?.stealth ?? true,
     // アイドル閾値は headless/profile と同様に自動 spawn が last-run を継承する。undefined の
     // ときは引数を渡さず、デーモン側で KB_IDLE_TIMEOUT / 既定にフォールバックさせる。
     idleTimeoutSec: opts.idleTimeoutSec ?? last?.idleTimeoutSec,
     // 拡張機能は channel/ua と同じ扱い: 'off' で明示リセット、未指定なら last-run を継承。
     extensions: opts.extensions === 'off' ? undefined : (opts.extensions ?? last?.extensions),
+    // タブ分離ホットキーも extensions と同じ扱い: 'off' で明示リセット、未指定なら last-run を継承。
+    detachKey: opts.detachKey === 'off' ? undefined : (opts.detachKey ?? last?.detachKey),
+    translateKey: opts.translateKey === 'off' ? undefined : (opts.translateKey ?? last?.translateKey),
     // stealth と同じ扱い: 明示 start は concrete boolean、自動 spawn は undefined → last-run 継承。
     ignoreHttpsErrors: opts.ignoreHttpsErrors ?? last?.ignoreHttpsErrors ?? false,
   };
@@ -188,6 +196,8 @@ export function spawnDaemon(
   if (merged.ignoreHttpsErrors) args.push('--ignore-https-errors');
   if (merged.idleTimeoutSec != null) args.push('--idle-timeout', String(merged.idleTimeoutSec));
   if (merged.extensions) args.push('--extensions', merged.extensions.length ? merged.extensions.join(',') : 'on');
+  if (merged.detachKey) args.push('--detach-key', merged.detachKey);
+  if (merged.translateKey) args.push('--translate-key', merged.translateKey);
   // アタッチは明示起動 (kb daemon start --cdp) のみ。last-run からは継承しない
   if (opts.cdpUrl) args.push('--cdp', opts.cdpUrl);
   const child = spawn(process.execPath, args, {

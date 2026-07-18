@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BodyStore, clip, inferJsonContentType, LogBuffer, normalizeUrl, parseHeaderArgs, prepareEval, splitExtensionsArg } from './util';
+import { BodyStore, clip, inferJsonContentType, LogBuffer, normalizeUrl, parseHeaderArgs, parseHotkey, prepareEval, splitExtensionsArg } from './util';
 
 /** prepareEval の出力を Node 上で実行して結果を確かめる(page.evaluate の代わり)。 */
 async function evalPrepared(code: string): Promise<unknown> {
@@ -8,6 +8,24 @@ async function evalPrepared(code: string): Promise<unknown> {
   // eslint-disable-next-line no-eval
   return (0, eval)(prepared);
 }
+
+test('parseHotkey: 修飾子 + 主キーを解析する', () => {
+  assert.deepEqual(parseHotkey('Alt+Shift+D'), { alt: true, ctrl: false, shift: true, meta: false, key: 'd' });
+  assert.deepEqual(parseHotkey('ctrl+shift+e'), { alt: false, ctrl: true, shift: true, meta: false, key: 'e' });
+  assert.deepEqual(parseHotkey('Cmd+F2'), { alt: false, ctrl: false, shift: false, meta: true, key: 'F2' });
+  // 修飾子名の別名(Control / Option / Win / Super)も受け付ける
+  assert.deepEqual(parseHotkey('Control+Option+K'), { alt: true, ctrl: true, shift: false, meta: false, key: 'k' });
+});
+
+test('parseHotkey: 主キー単体(修飾子なし)も可', () => {
+  assert.deepEqual(parseHotkey('F4'), { alt: false, ctrl: false, shift: false, meta: false, key: 'F4' });
+});
+
+test('parseHotkey: 不正なコンボはエラー', () => {
+  assert.throws(() => parseHotkey('Alt+Shift'), /主キーがありません/); // 修飾子だけ
+  assert.throws(() => parseHotkey(''), /主キーがありません/); // 空
+  assert.throws(() => parseHotkey('Ctrl+A+B'), /主キーが 2 つ/); // 主キー 2 つ
+});
 
 test('prepareEval: await なしはそのまま(従来動作を維持)', () => {
   assert.equal(prepareEval('1 + 1'), '1 + 1');

@@ -93,6 +93,13 @@ tool(
 );
 
 tool(
+  'kb_tabs_detach',
+  '指定したタブ(複数可)を新しい 1 枚のウィンドウへ分離する。複数指定するとまとめて 1 つの新ウィンドウに入る。引き継ぐのは URL のみ(ページ内 JS 状態・履歴・スクロール位置は失われる)。旧→新のタブ ID 対応と現在のタブ一覧を返す。',
+  { tabs: z.array(z.number().int()).describe('分離するタブ ID の配列(複数でまとめて 1 ウィンドウに)') },
+  safe(async ({ tabs }) => text(await rpc('tabs.detach', { tabs }))),
+);
+
+tool(
   'kb_text',
   'ページ本文のテキストを取得する(ページを読むときはまずこれ)。既定 20000 文字で切り詰め。',
   {
@@ -103,6 +110,31 @@ tool(
   safe(async ({ tab, maxChars, offset }) => {
     const r = await rpc('text', { tab, maxChars, offset });
     return text(withTruncNote(`# ${r.title}\n# ${r.url}\n\n${r.text}`, r));
+  }),
+);
+
+tool(
+  'kb_translate',
+  'ページ内容を翻訳する(Chrome の「このページを翻訳」相当)。既定(inPlace)は本文を訳文で置換してレイアウトを保ったまま日本語化し、restore で原文に戻す・toggle で翻訳⇄原文を切り替える。inPlace=false は書き換えず翻訳テキストを返す(外国語ページを読むとき用)。翻訳先は to(既定 ja)。',
+  {
+    to: z.string().optional().describe('翻訳先の言語コード(既定 ja)'),
+    from: z.string().optional().describe('翻訳元の言語コード(既定 auto = 自動判定)'),
+    inPlace: z.boolean().optional().describe('ページを訳文で書き換える(既定 true)。false でテキストを返すだけ'),
+    restore: z.boolean().optional().describe('翻訳を取り消して原文へ戻す(直前に翻訳したページ)'),
+    toggle: z.boolean().optional().describe('翻訳 ⇄ 原文 を切り替える'),
+    maxChars: z.number().int().optional().describe('(inPlace=false 時)最大文字数 (0 = 無制限)'),
+    offset: z.number().int().optional().describe('(inPlace=false 時)取得開始位置'),
+    tab,
+  },
+  safe(async ({ to, from, inPlace, restore, toggle, maxChars, offset, tab }) => {
+    const r = await rpc('translate', { to, from, inPlace: inPlace !== false, restore, toggle, maxChars, offset, tab });
+    if (r.inPlace) {
+      if (r.action === 'restored') return text(`restored original (${r.translated} text nodes)\n${r.url}`);
+      if (r.action === 'none') return text(`no translatable text found\n${r.url}`);
+      const partial = r.partial ? ` (partial: request cap reached, requests=${r.requests})` : '';
+      return text(`translated ${r.detected ?? from ?? 'auto'} → ${r.to}: ${r.translated}/${r.segments} text nodes${partial}\n${r.url}`);
+    }
+    return text(withTruncNote(`# ${r.title}\n# ${r.url}  (${r.detected ?? from ?? 'auto'} → ${r.to})\n\n${r.text}`, { totalChars: r.totalChars, offset: r.offset, truncated: r.truncated }));
   }),
 );
 

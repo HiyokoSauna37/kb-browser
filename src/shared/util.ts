@@ -35,6 +35,37 @@ export function splitExtensionsArg(value: string): string[] {
     .filter(Boolean);
 }
 
+/** キーコンボ (--detach-key) の解析結果。keydown イベントとの照合に使う。 */
+export interface Hotkey {
+  alt: boolean;
+  ctrl: boolean;
+  shift: boolean;
+  meta: boolean;
+  /** 主キー(1 文字キーは小文字化。F2 等の名前はそのまま)。event.key と大文字小文字を無視して照合する。 */
+  key: string;
+}
+
+/**
+ * "Alt+Shift+D" のようなキーコンボ文字列を解析する。修飾子は Ctrl/Control・Alt/Option・
+ * Shift・Meta/Cmd/Command/Win/Super を受け付け(大文字小文字無視)、残る 1 トークンを主キーにする。
+ * 主キーが無い / 2 つある / 空コンボはエラー(CLI が起動前に弾けるように投げる)。
+ */
+export function parseHotkey(combo: string): Hotkey {
+  const parts = combo.split('+').map((p) => p.trim()).filter(Boolean);
+  const hk: Hotkey = { alt: false, ctrl: false, shift: false, meta: false, key: '' };
+  for (const raw of parts) {
+    const p = raw.toLowerCase();
+    if (p === 'ctrl' || p === 'control') hk.ctrl = true;
+    else if (p === 'alt' || p === 'option') hk.alt = true;
+    else if (p === 'shift') hk.shift = true;
+    else if (p === 'meta' || p === 'cmd' || p === 'command' || p === 'win' || p === 'super') hk.meta = true;
+    else if (hk.key) throw new Error(`キーコンボに主キーが 2 つあります: "${combo}"`);
+    else hk.key = raw.length === 1 ? raw.toLowerCase() : raw;
+  }
+  if (!hk.key) throw new Error(`キーコンボに主キーがありません(修飾子だけ、または空): "${combo}"`);
+  return hk;
+}
+
 /**
  * kb eval のコードを page.evaluate に渡せる形に整える。
  * - await を含まないコードはそのまま(従来どおり eval の完了値が返る)。

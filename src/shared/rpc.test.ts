@@ -11,12 +11,12 @@ test('isRpcCommand: 既知コマンドは true、未知は false', () => {
 });
 
 test('コマンド数が想定どおり(意図しない削除の検知)', () => {
-  assert.equal(Object.keys(rpcSchemas).length, 64);
+  assert.equal(Object.keys(rpcSchemas).length, 66);
 });
 
 test('全スキーマが空引数 {} を parse できる(必須フィールドのあるものは除く)', () => {
   const requiresArgs = new Set([
-    'open', 'tabs.close', 'tabs.activate', 'screenshot', 'eval', 'fill', 'press', 'pdf',
+    'open', 'tabs.close', 'tabs.activate', 'tabs.detach', 'screenshot', 'eval', 'fill', 'press', 'pdf',
     'cookies.set', 'cookies.rm', 'net.body', 'net.headers', 'net.block', 'net.mock',
     'dom.query', 'request', 'profile.set', 'emulate.geo', 'emulate.net',
   ]);
@@ -31,6 +31,8 @@ test('必須フィールドの欠落は reject する', () => {
   assert.throws(() => rpcSchemas['eval'].parse({}));
   assert.throws(() => rpcSchemas['fill'].parse({ selector: '#x' })); // value 必須
   assert.throws(() => rpcSchemas['emulate.geo'].parse({ latitude: 1 })); // longitude 必須
+  assert.throws(() => rpcSchemas['tabs.detach'].parse({})); // tabs 必須
+  assert.throws(() => rpcSchemas['tabs.detach'].parse({ tabs: [] })); // 空配列は不可 (min 1)
 });
 
 test('代表的な正常ペイロードが通る', () => {

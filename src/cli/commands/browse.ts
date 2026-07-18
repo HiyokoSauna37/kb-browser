@@ -61,6 +61,21 @@ export function registerBrowseCommands(program: Command): void {
       }),
     );
 
+  tabs
+    .command('detach <ids...>')
+    .description('指定タブを新しい 1 枚のウィンドウへ分離する(複数指定でまとめて 1 ウィンドウに)。引き継ぐのは URL のみ(ページ内 JS 状態・履歴・スクロール位置は失われる)')
+    .action(
+      run(async (ids: string[]) => {
+        const tabIds = ids.map((s) => intOpt(s));
+        if (tabIds.some((n) => !Number.isInteger(n))) throw new Error('タブ ID は整数で指定してください');
+        const result = await rpc('tabs.detach', { tabs: tabIds });
+        print(result, (r) => {
+          const moved = r.detached.map((d: { from: number; to: number; url: string }) => `  [${d.from}] → [${d.to}] ${d.url}`).join('\n');
+          return `${r.detached.length} 個のタブを新しいウィンドウへ分離しました(旧 → 新タブ ID):\n${moved}\n\n現在のタブ:\n${fmtTabs(r.tabs)}`;
+        });
+      }),
+    );
+
   program
     .command('screenshot [selector]')
     .description('スクリーンショットを保存する(selector か --ref を指定すると要素単位で撮る)')
@@ -102,6 +117,44 @@ export function registerBrowseCommands(program: Command): void {
       run(async (opts: { tab?: number; maxChars?: number; offset?: number }) => {
         const result = await rpc('text', { tab: opts.tab, maxChars: opts.maxChars, offset: opts.offset });
         print(result, (r) => `# ${r.title}\n# ${r.url}\n\n${r.text}${truncNote(r, r.text.length)}`);
+      }),
+    );
+
+  program
+    .command('translate')
+    .description('ページ内容を翻訳する(既定は Chrome の「このページを翻訳」相当に本文を in-place で日本語化。--restore で原文へ / --toggle で翻訳⇄原文 / --text で書き換えず翻訳テキストを出力)')
+    .option('--to <lang>', '翻訳先の言語コード', 'ja')
+    .option('--from <lang>', '翻訳元の言語コード(既定 auto = 自動判定)', 'auto')
+    .option('--restore', '翻訳を取り消して原文に戻す(直前に in-place 翻訳したページ)')
+    .option('--toggle', '翻訳 ⇄ 原文 を切り替える(初回は翻訳、再翻訳・復元はキャッシュ利用)')
+    .option('--text', 'ページを書き換えず、翻訳した本文テキストを出力する')
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .option('--max-chars <n>', '(--text 時)最大文字数 (0 = 無制限)', intOpt)
+    .option('--offset <n>', '(--text 時)取得開始位置', intOpt)
+    .action(
+      run(async (opts: { to: string; from: string; restore?: boolean; toggle?: boolean; text?: boolean; tab?: number; maxChars?: number; offset?: number }) => {
+        if (opts.text && (opts.restore || opts.toggle)) throw new Error('--text は --restore / --toggle と併用できません(--text はページを書き換えないため)');
+        const result = await rpc('translate', {
+          to: opts.to,
+          from: opts.from,
+          inPlace: !opts.text,
+          restore: opts.restore,
+          toggle: opts.toggle,
+          tab: opts.tab,
+          maxChars: opts.maxChars,
+          offset: opts.offset,
+        });
+        print(result, (r) => {
+          const src = opts.from === 'auto' ? (r.detected ?? 'auto') : r.from;
+          if (r.inPlace) {
+            if (r.action === 'restored') return `原文に戻しました(${r.translated} テキストノード)。\n${r.url}`;
+            if (r.action === 'none') return `翻訳対象のテキストがありませんでした。\n${r.url}`;
+            const partial = r.partial ? `\n(翻訳リクエスト上限に達したため一部は原文のままです。requests=${r.requests})` : '';
+            return `ページを ${src} → ${r.to} に翻訳しました(${r.translated}/${r.segments} テキストノードを置換)。\n${r.url}${partial}`;
+          }
+          const partial = r.partial ? '\n\n(翻訳リクエスト上限に達したため一部の行は原文のままです)' : '';
+          return `# ${r.title}\n# ${r.url}  (${src} → ${r.to})\n\n${r.text}${truncNote(r, r.text.length)}${partial}`;
+        });
       }),
     );
 

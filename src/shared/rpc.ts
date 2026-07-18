@@ -47,6 +47,7 @@ export const rpcSchemas = {
   'tabs.list': empty,
   'tabs.close': z.object({ tab: z.number().int() }),
   'tabs.activate': z.object({ tab: z.number().int() }),
+  'tabs.detach': z.object({ tabs: z.array(z.number().int()).min(1) }),
   'screenshot': z.object({
     path: z.string(),
     full: z.boolean().optional(),
@@ -57,6 +58,15 @@ export const rpcSchemas = {
     tab,
   }),
   'text': z.object({ tab, ...paging }),
+  'translate': z.object({
+    to: z.string().optional(),
+    from: z.string().optional(),
+    inPlace: z.boolean().optional(),
+    restore: z.boolean().optional(),
+    toggle: z.boolean().optional(),
+    tab,
+    ...paging,
+  }),
   'html': z.object({ tab, ...paging }),
   'snapshot': z.object({ tab, ...paging }),
   'eval': z.object({ expression: z.string(), tab, ...paging }),
