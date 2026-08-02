@@ -117,6 +117,8 @@ export const rpcSchemas = {
   }),
   'net.body': z.object({ seq: z.number(), ...paging }),
   'net.headers': z.object({ seq: z.number() }),
+  // 捕捉済みログからの HAR 遡及合成(ライブ記録の net.har.* とは別物)。
+  'net.export': z.object({ tab, filter: z.string().optional(), limit: z.number().optional() }),
   'net.clear': empty,
   'net.block': z.object({ pattern: z.string() }),
   'net.mock': z.object({
@@ -130,6 +132,18 @@ export const rpcSchemas = {
   'net.har.start': empty,
   'net.har.stop': empty,
   'net.har.status': empty,
+
+  // --- WebSocket(観測 + ページ内ソケットの送受信) ---
+  'ws.log': z.object({ tab, since: z.number().optional(), filter: z.string().optional(), limit: z.number().optional() }),
+  'ws.clear': empty,
+  'ws.connect': z.object({ url: z.string(), protocols: z.array(z.string()).optional(), timeoutMs: z.number().optional(), tab }),
+  'ws.send': z.object({ id: z.number().int(), data: z.string(), base64: z.boolean().optional(), tab }),
+  'ws.recv': z.object({ id: z.number().int(), since: z.number().optional(), limit: z.number().optional(), tab }),
+  'ws.list': z.object({ tab }),
+  'ws.close': z.object({ id: z.number().int(), code: z.number().optional(), reason: z.string().optional(), tab }),
+
+  // --- セッション診断 ---
+  'session.check': z.object({ url: z.string(), api: z.string().optional(), timeoutMs: z.number().optional() }),
 
   // --- コンソール / DOM ---
   'console.log': z.object({ tab, since: z.number().optional(), limit: z.number().optional() }),
@@ -213,7 +227,8 @@ export function isRpcCommand(cmd: string): cmd is RpcCommand {
 export const JOURNAL_EXCLUDE: ReadonlySet<RpcCommand> = new Set<RpcCommand>([
   'daemon.status', 'daemon.stop',
   'tabs.list', 'downloads.list', 'cookies.list', 'storage.dump',
-  'net.log', 'net.body', 'net.headers', 'net.rules', 'net.har.status',
+  'net.log', 'net.body', 'net.headers', 'net.export', 'net.rules', 'net.har.status',
+  'ws.log', 'ws.list', 'ws.recv',
   'console.log', 'proxy.status', 'proxy.test',
   'log.start', 'log.stop', 'log.status',
   'dialog.info',

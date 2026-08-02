@@ -2,7 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { rpc } from '../../shared/client';
-import { print, run } from '../output';
+import { toCookieHeader, toNetscape, type KbCookie } from '../../shared/cookies';
+import { fmtDuration } from '../../shared/format';
+import { KB_VERSION } from '../../shared/version';
+import { intOpt, print, run } from '../output';
 
 /** kb downloads / cookies / storage — ブラウザに蓄積される状態の管理。 */
 export function registerStateCommands(program: Command): void {
@@ -91,14 +94,41 @@ export function registerStateCommands(program: Command): void {
 
   cookies
     .command('export')
-    .description('全 Cookie を JSON ファイルに書き出す')
-    .option('-o, --out <path>', '出力先', 'kb-cookies.json')
+    .description('Cookie を書き出す (json / netscape=cookies.txt / header=Cookie ヘッダ 1 行)')
+    .option('--format <fmt>', '出力形式 (json | netscape | header)', 'json')
+    .option('--url <url>', 'header 形式で、この URL に実際に送られる Cookie だけに絞る(ドメイン/パス/Secure を考慮)')
+    .option('-d, --domain <domain>', 'ドメインで絞り込む')
+    .option('-o, --out <path>', '出力先(json は既定 kb-cookies.json、他は省略時に標準出力)')
     .action(
-      run(async (opts: { out: string }) => {
-        const all = await rpc('cookies.list', {});
+      run(async (opts: { format: string; url?: string; domain?: string; out?: string }) => {
+        const all = (await rpc('cookies.list', { domain: opts.domain })) as KbCookie[];
+        if (opts.format === 'json') {
+          const outPath = path.resolve(opts.out ?? 'kb-cookies.json');
+          fs.writeFileSync(outPath, JSON.stringify(all, null, 2));
+          return print({ path: outPath, cookies: all.length, format: 'json' }, (r) => `${r.path} (${r.cookies} cookies)`);
+        }
+        let content: string;
+        let count: number;
+        if (opts.format === 'netscape') {
+          content = toNetscape(all, { version: KB_VERSION });
+          count = all.length;
+        } else if (opts.format === 'header') {
+          content = toCookieHeader(all, opts.url);
+          count = content ? content.split('; ').length : 0;
+          if (!count) {
+            throw new Error(
+              opts.url
+                ? `${opts.url} に送られる Cookie はありません(kb cookies list -d <domain> で確認してください)`
+                : 'Cookie はありません',
+            );
+          }
+        } else {
+          throw new Error(`未対応の形式です: ${opts.format}(json | netscape | header)`);
+        }
+        if (!opts.out) return print({ format: opts.format, cookies: count, content }, (r) => r.content);
         const outPath = path.resolve(opts.out);
-        fs.writeFileSync(outPath, JSON.stringify(all, null, 2));
-        print({ path: outPath, cookies: all.length }, (r) => `${r.path} (${r.cookies} cookies)`);
+        fs.writeFileSync(outPath, opts.format === 'header' ? content + '\n' : content);
+        print({ path: outPath, cookies: count, format: opts.format }, (r) => `${r.path} (${r.cookies} cookies, ${r.format})`);
       }),
     );
 
@@ -122,6 +152,43 @@ export function registerStateCommands(program: Command): void {
       run(async () => {
         await rpc('cookies.clear');
         print({ cleared: true }, () => 'cleared');
+      }),
+    );
+
+  const session = program.command('session').description('セッション状態の診断');
+
+  session
+    .command('check <url>')
+    .description('その URL の応答が「対象パスの性質」か「自分のセッション劣化」かを、トップページとの対照で判定する')
+    .option('--api <url>', '対照に使う API の URL(省略時はこのセッションで観測した同ホストの xhr/fetch を自動選択)')
+    .option('--timeout <sec>', '各プローブのタイムアウト秒', intOpt, 15)
+    .action(
+      run(async (url: string, opts: { api?: string; timeout: number }) => {
+        const r = await rpc('session.check', { url, api: opts.api, timeoutMs: opts.timeout * 1000 });
+        print(r, (x) => {
+          const c = x.client;
+          const lines = [
+            `host: ${x.host}  (profile=${c.profile}, ${c.headless ? 'headless' : 'headed'}, channel=${c.channel}, stealth=${c.stealth ? 'on' : 'off'}${c.attached ? ', attached' : ''})`,
+          ];
+          for (const p of x.probes) {
+            const status = p.error ? `ERR ${p.error}` : `${p.status ?? '?'}`;
+            const challenge = p.challenged ? `  ⚠ challenge [${p.vendor}: ${p.marker}]` : '';
+            const settled = p.settledAfterMs != null ? `  (チャレンジは ${p.settledAfterMs}ms で自動通過)` : '';
+            const auto = p.label === 'api' && x.apiAuto ? '  ← 自動選択' : '';
+            lines.push(`  ${p.label.padEnd(7)} ${String(status).padEnd(4)} ${p.via.padEnd(8)} ${p.url}${challenge}${settled}${auto}`);
+          }
+          const cookies = x.cookies.length
+            ? x.cookies
+                .map(
+                  (ck: any) =>
+                    `${ck.name}(${ck.expiresIn == null ? 'session' : `期限まで ${fmtDuration(ck.expiresIn)}`}, kb 観測 ${fmtDuration(ck.ageSeen)}前)`,
+                )
+                .join(', ')
+            : '(セッション系 Cookie なし)';
+          lines.push(`  cookies: ${cookies}  [この URL に送られる Cookie 計 ${x.cookieCount} 件]`);
+          lines.push('', `verdict: ${x.verdict}`, `→ ${x.hint}`);
+          return lines.join('\n');
+        });
       }),
     );
 

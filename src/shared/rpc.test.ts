@@ -11,7 +11,7 @@ test('isRpcCommand: 既知コマンドは true、未知は false', () => {
 });
 
 test('コマンド数が想定どおり(意図しない削除の検知)', () => {
-  assert.equal(Object.keys(rpcSchemas).length, 66);
+  assert.equal(Object.keys(rpcSchemas).length, 75);
 });
 
 test('全スキーマが空引数 {} を parse できる(必須フィールドのあるものは除く)', () => {
@@ -19,6 +19,7 @@ test('全スキーマが空引数 {} を parse できる(必須フィールド�
     'open', 'tabs.close', 'tabs.activate', 'tabs.detach', 'screenshot', 'eval', 'fill', 'press', 'pdf',
     'cookies.set', 'cookies.rm', 'net.body', 'net.headers', 'net.block', 'net.mock',
     'dom.query', 'request', 'profile.set', 'emulate.geo', 'emulate.net',
+    'ws.connect', 'ws.send', 'ws.recv', 'ws.close', 'session.check',
   ]);
   for (const [name, schema] of Object.entries(rpcSchemas)) {
     if (requiresArgs.has(name)) continue;

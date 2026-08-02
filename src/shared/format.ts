@@ -5,6 +5,22 @@ export function hhmmss(ts: string): string {
   return ts.slice(11, 19);
 }
 
+/**
+ * 秒を人が読める長さにする(kb session check の Cookie 期限・観測経過時間)。
+ * 期限切れ(負)は "-" 付きで返し、切れていること自体を隠さない。
+ */
+export function fmtDuration(sec: number): string {
+  const sign = sec < 0 ? '-' : '';
+  const s = Math.abs(Math.round(sec));
+  if (s < 60) return `${sign}${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${sign}${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${sign}${h}h${m % 60 ? `${m % 60}m` : ''}`;
+  const d = Math.floor(h / 24);
+  return `${sign}${d}d${h % 24 ? `${h % 24}h` : ''}`;
+}
+
 export interface TruncatedResult {
   totalChars: number;
   offset: number;

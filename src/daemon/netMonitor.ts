@@ -1,4 +1,5 @@
 import type { BrowserContext, Page, Request, Response, Route } from 'playwright';
+import { buildHar, type HarSourceEntry } from '../shared/har';
 import { BodyStore, clip, LogBuffer } from '../shared/util';
 import { KB_VERSION } from '../shared/version';
 import { LOG_CAP, TEXT_CAP, TEXT_CONTENT_RE, type NetEntry, type RouteRule } from './types';
@@ -20,8 +21,23 @@ const NET_BODY_MAX_COUNT = 500;
 const NET_BODY_MAX_BYTES = 32 * 1024 * 1024;
 /** 本文を捕捉するリソース種別(API デバッグ用途。画像や大量の静的アセットは対象外)。 */
 const BODY_RESOURCE_TYPES = new Set(['xhr', 'fetch', 'document', 'other']);
-/** 全ヘッダ捕捉の保持件数上限(kb net headers 用。全レスポンスが対象)。 */
+/** 全ヘッダ捕捉の保持件数上限(kb net headers / net export 用。全レスポンスが対象)。 */
 const NET_HEADERS_MAX = 2000;
+/** kb request(context.request 経由)由来エントリの resourceType とタブ ID(ページに属さない)。 */
+const KB_REQUEST_RESOURCE_TYPE = 'kb-request';
+const KB_REQUEST_TAB = -1;
+
+/**
+ * レスポンスごとに保持する付帯情報。kb net headers に加えて、
+ * kb net export --format har が HAR を遡及合成するのに必要な分(postData / statusText / timing)も持つ。
+ */
+interface NetMeta {
+  request: Record<string, string>;
+  response: Record<string, string>;
+  statusText?: string;
+  postData?: string;
+  timings?: { wait: number; receive: number };
+}
 
 /**
  * ネットワークの監視・改変 (DevTools Network 相当) を担当する。
@@ -37,8 +53,8 @@ export class NetMonitor {
     NET_BODY_MAX_COUNT,
     NET_BODY_MAX_BYTES,
   );
-  /** 捕捉した全ヘッダ(kb net headers 用)。キーは response エントリの seq。挿入順で NET_HEADERS_MAX に切り詰め。 */
-  private netHeaders = new Map<number, { request: Record<string, string>; response: Record<string, string> }>();
+  /** 捕捉した全ヘッダと付帯情報。キーは response エントリの seq。挿入順で NET_HEADERS_MAX に切り詰め。 */
+  private netMeta = new Map<number, NetMeta>();
   private routes = new Map<number, RouteRule & { handler: (route: Route) => void }>();
   private nextRouteId = 1;
   private har: { startedAt: string; entries: unknown[]; bodyBytes: number; truncated: boolean } | null = null;
@@ -109,6 +125,25 @@ export class NetMonitor {
     this.netLog.clear();
   }
 
+  /**
+   * そのホスト宛の直近 xhr/fetch レスポンスの URL。
+   * kb session check が「このサイトのアプリ自身が叩いている API」を自動で選ぶのに使う
+   * (HTML と API でルールセットが違うケースを、実在のエンドポイントで測るため)。
+   */
+  lastApiUrlForHost(host: string): string | undefined {
+    const { entries } = this.netLog.query({
+      filter: (e) => {
+        if (e.event !== 'response' || (e.resourceType !== 'xhr' && e.resourceType !== 'fetch')) return false;
+        try {
+          return new URL(e.url).hostname === host;
+        } catch {
+          return false;
+        }
+      },
+    });
+    return entries[entries.length - 1]?.url;
+  }
+
   // ---- block / mock ルール ----
 
   async addBlock(context: BrowserContext, pattern: string): Promise<RouteRule> {
@@ -152,6 +187,15 @@ export class NetMonitor {
 
   // ---- 本文・ヘッダの捕捉 ----
 
+  /** メタを保存し、保持件数上限を超えた古いものから捨てる。 */
+  private setMeta(seq: number, meta: NetMeta): void {
+    this.netMeta.set(seq, meta);
+    for (const key of this.netMeta.keys()) {
+      if (this.netMeta.size <= NET_HEADERS_MAX) break;
+      this.netMeta.delete(key);
+    }
+  }
+
   /**
    * レスポンス本文を捕捉する(kb net body 用)。API デバッグが目的なので、
    * テキスト系 Content-Type の XHR / fetch / document / other のみ対象。
@@ -173,17 +217,25 @@ export class NetMonitor {
     }
   }
 
-  /** 全ヘッダ(Cookie 等の CDP extra info 含む)を捕捉する。kb net headers と操作ジャーナル用。 */
+  /** 全ヘッダ(Cookie 等の CDP extra info 含む)を捕捉する。kb net headers / net export と操作ジャーナル用。 */
   private async captureNetHeaders(seq: number, req: Request, res: Response, tabId: number): Promise<void> {
     try {
       const [request, response] = await Promise.all([req.allHeaders(), res.allHeaders()]);
       // kb 内部の中継プロキシ認証(セッショントークン)はサイト通信と無関係なので露出させない
       delete request['proxy-authorization'];
-      this.netHeaders.set(seq, { request, response });
-      for (const key of this.netHeaders.keys()) {
-        if (this.netHeaders.size <= NET_HEADERS_MAX) break;
-        this.netHeaders.delete(key);
-      }
+      // timing は requestfinished 前だと responseEnd が -1 になり得るので、取れた分だけ記録する
+      const t = req.timing();
+      const timings =
+        t.responseStart >= 0
+          ? { wait: t.responseStart, receive: Math.max(t.responseEnd - t.responseStart, 0) }
+          : undefined;
+      this.setMeta(seq, {
+        request,
+        response,
+        statusText: res.statusText(),
+        postData: req.postData() ?? undefined,
+        timings,
+      });
       const resourceType = req.resourceType();
       if (BODY_RESOURCE_TYPES.has(resourceType)) {
         this.onJournalNet({
@@ -272,7 +324,7 @@ export class NetMonitor {
     response: Record<string, string>;
   } {
     const { seq: resolvedSeq, entry } = this.resolveResponseSeq(seq);
-    const stored = this.netHeaders.get(resolvedSeq);
+    const stored = this.netMeta.get(resolvedSeq);
     if (!stored) {
       const reason = entry
         ? `seq ${seq} のヘッダは記録されていません(直近 ${NET_HEADERS_MAX} レスポンスまで保持)`
@@ -287,6 +339,108 @@ export class NetMonitor {
       request: stored.request,
       response: stored.response,
     };
+  }
+
+  // ---- kb request (context.request) の記録 ----
+
+  /**
+   * ページイベントに乗らない kb request(context.request 経由)を通信ログに載せる。
+   * ページ通信と区別できるよう resourceType は kb-request、tab は -1 で記録する。
+   * ジャーナルには command イベントとして別途記録済みなので onJournalNet は呼ばない。
+   */
+  recordExternalRequest(ex: {
+    method: string;
+    url: string;
+    status: number;
+    statusText?: string;
+    requestHeaders?: Record<string, string>;
+    postData?: string;
+    responseHeaders: Record<string, string>;
+    body?: Buffer;
+    ms?: number;
+  }): NetEntry {
+    const entry = this.netLog.push({
+      ts: new Date().toISOString(),
+      tab: KB_REQUEST_TAB,
+      event: 'response',
+      method: ex.method,
+      url: ex.url,
+      status: ex.status,
+      resourceType: KB_REQUEST_RESOURCE_TYPE,
+    });
+    this.setMeta(entry.seq, {
+      request: ex.requestHeaders ?? {},
+      response: ex.responseHeaders,
+      statusText: ex.statusText,
+      postData: ex.postData,
+      // 内訳(wait / receive)は取れないため、往復時間をまとめて wait に入れる
+      ...(ex.ms != null ? { timings: { wait: ex.ms, receive: 0 } } : {}),
+    });
+    const contentType = ex.responseHeaders['content-type'] ?? '';
+    if (ex.body?.length && TEXT_CONTENT_RE.test(contentType)) {
+      this.netBodies.set(entry.seq, {
+        body: ex.body.length > NET_BODY_CAP ? ex.body.subarray(0, NET_BODY_CAP) : ex.body,
+        contentType,
+        fullBytes: ex.body.length,
+      });
+    }
+    return entry;
+  }
+
+  // ---- HAR エクスポート(捕捉済みログからの遡及合成) ----
+
+  /**
+   * 既に捕捉済みのログ・ヘッダ・本文から HAR を合成する(kb net export --format har)。
+   * ライブ記録(har start/stop)と違って事前準備なしに「今バッファにあるもの」を出せるが、
+   * 捕捉時の上限に縛られる: ヘッダは直近 NET_HEADERS_MAX 件、本文はテキスト系のみ・
+   * 1 件 NET_BODY_CAP まで、timing は取れた分だけ。欠落は log.comment に明示する。
+   */
+  exportHar(opts: { tab?: number; filter?: string; limit?: number } = {}): { log: Record<string, unknown> } {
+    const re = opts.filter ? new RegExp(opts.filter, 'i') : null;
+    const { entries } = this.netLog.query({
+      limit: opts.limit,
+      filter: (e) =>
+        e.event !== 'request' && // 送信相は完了相(response / requestfailed)と重複するので除く
+        (opts.tab == null || e.tab === opts.tab) &&
+        (re == null || re.test(e.url)),
+    });
+    let withoutHeaders = 0;
+    const sources: HarSourceEntry[] = entries.map((e) => {
+      const meta = this.netMeta.get(e.seq);
+      const stored = this.netBodies.get(e.seq);
+      if (!meta && e.event === 'response') withoutHeaders++;
+      return {
+        seq: e.seq,
+        ts: e.ts,
+        tab: e.tab,
+        method: e.method,
+        url: e.url,
+        resourceType: e.resourceType,
+        status: e.status,
+        statusText: meta?.statusText,
+        failure: e.failure,
+        requestHeaders: meta?.request,
+        responseHeaders: meta?.response,
+        postData: meta?.postData,
+        timings: meta?.timings,
+        ...(stored
+          ? {
+              body: {
+                text: stored.body.toString('utf8'),
+                fullBytes: stored.fullBytes,
+                contentType: stored.contentType,
+                truncated: stored.fullBytes > stored.body.length,
+              },
+            }
+          : {}),
+      };
+    });
+    const notes = [
+      'kb net export: 捕捉済みのログから合成した HAR です(ライブ記録の kb net har start/stop とは別物)。',
+      `本文はテキスト系レスポンスのみ・1 件 ${Math.round(NET_BODY_CAP / 1024)}KB までで、それ以外のエントリに content.text はありません。`,
+    ];
+    if (withoutHeaders) notes.push(`${withoutHeaders} 件はヘッダ保持上限(直近 ${NET_HEADERS_MAX} レスポンス)を超えており、ヘッダ・postData がありません。`);
+    return buildHar(sources, { creatorVersion: KB_VERSION, comment: notes.join(' ') });
   }
 
   // ---- HAR 記録 ----

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   MASK,
   maskBody,
+  maskJwts,
   maskPath,
   maskUrl,
   maskUrlsInText,
@@ -272,4 +273,75 @@ test('reportMarkdown / stepsMarkdown: コマンドがステップ化され通信
   const steps = stepsMarkdown(events, meta);
   assert.match(steps, /1\. `kb open https:\/\/example\.com`/);
   assert.match(steps, /2\. `kb click --ref e5`/);
+});
+
+// ---- JWT / サイト固有の機微ヘッダ(v0.12.0) ----
+
+/** 3 セグメントの JWT っぽい文字列(値そのものに意味はない)。 */
+const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSIsImV4cCI6OTk5OX0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk';
+const JWT_HEAD_PAYLOAD = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSIsImV4cCI6OTk5OX0';
+
+test('maskJwts: 既定は署名部だけを潰し、クレームは証拠として残す', () => {
+  assert.equal(maskJwts(`token is ${JWT} ok`, M), `token is ${JWT_HEAD_PAYLOAD}.${MASK} ok`);
+  assert.equal(maskJwts(JWT, { mask: true, jwt: 'full' }), MASK);
+  assert.equal(maskJwts(JWT, { mask: true, jwt: 'off' }), JWT);
+  assert.equal(maskJwts(JWT, NO_M), JWT); // --no-mask では触らない
+});
+
+test('maskJwts: 二重適用しても [MASKED] が増えない(冪等)', () => {
+  const once = maskJwts(`{"assertion":"${JWT}"}`, M);
+  assert.equal(maskJwts(once, M), once);
+  assert.equal(once, `{"assertion":"${JWT_HEAD_PAYLOAD}.${MASK}"}`);
+});
+
+test('redactEvent: サイト固有の x-*-token / x-*-signature ヘッダも既定でマスクされる', () => {
+  const e = netEvent({
+    requestHeaders: {
+      'x-validation-token': 'v-123',
+      'x-request-signature': 'sig-abc',
+      'x-amz-security-token': 'amz-1',
+      'x-trace-id': 'trace-1',
+    },
+  });
+  const r = redactEvent(e, M) as NetEvent;
+  assert.equal(r.requestHeaders!['x-validation-token'], MASK);
+  assert.equal(r.requestHeaders!['x-request-signature'], MASK);
+  assert.equal(r.requestHeaders!['x-amz-security-token'], MASK);
+  assert.equal(r.requestHeaders!['x-trace-id'], 'trace-1'); // 機微でないヘッダは残る
+});
+
+test('redactEvent: 機微でないヘッダ名に載った JWT も形状で署名部が潰れる', () => {
+  const e = netEvent({ requestHeaders: { 'x-custom': `Bearer ${JWT}` } });
+  const r = redactEvent(e, M) as NetEvent;
+  assert.equal(r.requestHeaders!['x-custom'], `Bearer ${JWT_HEAD_PAYLOAD}.${MASK}`);
+});
+
+test('maskBody: 機微キー名でない JSON 値の JWT も署名部が潰れる', () => {
+  const masked = maskBody(JSON.stringify({ assertion: JWT, note: 'plain' }), M);
+  assert.equal(JSON.parse(masked).assertion, `${JWT_HEAD_PAYLOAD}.${MASK}`);
+  assert.equal(JSON.parse(masked).note, 'plain');
+});
+
+test('maskBody: form-urlencoded の非機微キーに載った JWT も潰れる', () => {
+  assert.equal(maskBody(`assertion=${JWT}&mode=x`, M), `assertion=${JWT_HEAD_PAYLOAD}.${MASK}&mode=x`);
+});
+
+test('redactEvent: URL のパスセグメントに埋まった JWT も潰れる(クエリキー名がなくても)', () => {
+  const e = netEvent({ url: `https://api.example.com/verify/${JWT}` });
+  const r = redactEvent(e, M) as NetEvent;
+  assert.equal(r.url, `https://api.example.com/verify/${JWT_HEAD_PAYLOAD}.${MASK}`);
+});
+
+test('redactEvent: eval の式に書かれた JWT も潰れる', () => {
+  const e = cmdEvent('eval', { expression: `localStorage.setItem('t','${JWT}')` });
+  const r = redactEvent(e, M) as CommandEvent;
+  assert.equal(r.args.expression, `localStorage.setItem('t','${JWT_HEAD_PAYLOAD}.${MASK}')`);
+});
+
+test('redactEvent: --mask-jwt off でも既定のヘッダ名マスクは効いたまま', () => {
+  const off = { mask: true, jwt: 'off' as const };
+  const e = netEvent({ requestHeaders: { authorization: `Bearer ${JWT}`, 'x-custom': JWT } });
+  const r = redactEvent(e, off) as NetEvent;
+  assert.equal(r.requestHeaders!['authorization'], MASK);
+  assert.equal(r.requestHeaders!['x-custom'], JWT);
 });

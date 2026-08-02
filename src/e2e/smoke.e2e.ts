@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -33,6 +34,51 @@ const PAGE = html`<!doctype html>
 
 const dataUrl = (body: string) => 'data:text/html,' + encodeURIComponent(body);
 
+/**
+ * テスト用の最小 WebSocket エコーサーバ(依存を増やさないため手書き)。
+ * 単一フレームのテキストのみ扱い、受信した本文に "echo:" を付けて返す。
+ */
+function attachWsEcho(server: http.Server): void {
+  server.on('upgrade', (req, socket) => {
+    const key = req.headers['sec-websocket-key'] ?? '';
+    const accept = crypto
+      .createHash('sha1')
+      .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest('base64');
+    socket.write(
+      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+    );
+    socket.on('data', (buf: Buffer) => {
+      const opcode = buf[0] & 0x0f;
+      if (opcode === 0x8) return void socket.end(); // close フレーム
+      if (opcode !== 0x1) return;
+      let len = buf[1] & 0x7f;
+      let off = 2;
+      if (len === 126) {
+        len = buf.readUInt16BE(2);
+        off = 4;
+      }
+      const masked = (buf[1] & 0x80) !== 0;
+      const mask = masked ? buf.subarray(off, off + 4) : null;
+      if (masked) off += 4;
+      const payload = Buffer.from(buf.subarray(off, off + len));
+      if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+      const msg = Buffer.from(`echo:${payload.toString('utf8')}`);
+      // サーバ → クライアントのフレームはマスクしない
+      const header =
+        msg.length < 126
+          ? Buffer.from([0x81, msg.length])
+          : Buffer.concat([Buffer.from([0x81, 126]), (() => {
+              const b = Buffer.alloc(2);
+              b.writeUInt16BE(msg.length);
+              return b;
+            })()]);
+      socket.write(Buffer.concat([header, msg]));
+    });
+    socket.on('error', () => {});
+  });
+}
+
 const available = browserAvailable();
 
 describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chrome/edge)が見つからないため skip' }, () => {
@@ -63,12 +109,21 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
             'Set-Cookie': ['e2e1=v1; Path=/', 'e2e2=v2; Path=/'],
           });
           res.end('cookie ok');
+        } else if (req.url === '/protected') {
+          // アプリ由来の 403(bot チャレンジのマーカーは無い)
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end('{"error":"forbidden"}');
+        } else if (req.url === '/challenge') {
+          // bot 対策のチャレンジページを模したもの
+          res.writeHead(403, { 'Content-Type': 'text/html' });
+          res.end('<html><head><title>Just a moment...</title></head><body>Verifying you are human</body></html>');
         } else {
           res.writeHead(404);
           res.end('not found');
         }
       })
       .listen(0, '127.0.0.1');
+    attachWsEcho(server);
     await new Promise<void>((resolve) => server.once('listening', resolve));
     const addr = server.address();
     if (addr == null || typeof addr === 'string') throw new Error('ローカルサーバの port が取得できません');
@@ -255,6 +310,28 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
     assert.ok(names.includes('e2e2'), `e2e2 が cookie に載るはず: ${names.join(',')}`);
   });
 
+  test('net.export: 捕捉済みログから HAR を合成する(kb request も含む)', { timeout: 30_000 }, async () => {
+    // ページの fetch(/api/data)と kb request(POST /api/data)の両方が HAR に載ること
+    await rpc('request', { url: `${origin}/api/data`, method: 'POST', data: '{"har":1}' });
+    const har = await rpc('net.export', { filter: '/api/data' });
+    assert.equal(har.log.version, '1.2');
+    const entries = har.log.entries as any[];
+    assert.ok(entries.length >= 2, `ページ通信と kb request の両方が載るはず: ${entries.length} entries`);
+
+    const page = entries.find((e) => e._kbResourceType !== 'kb-request');
+    assert.ok(page, 'ページ由来のエントリがあるはず');
+    assert.equal(page.response.status, 200);
+    assert.equal(JSON.parse(page.response.content.text).hello, 'kb');
+    assert.ok(page.request.headers.length > 0, 'ヘッダが載るはず');
+
+    const external = entries.find((e) => e._kbResourceType === 'kb-request');
+    assert.ok(external, 'kb request 由来のエントリがあるはず');
+    assert.equal(external.request.method, 'POST');
+    // postData を保持していないと bb ツールでの再送・改変ができない(この機能の肝)
+    assert.equal(external.request.postData.text, '{"har":1}');
+    assert.equal(external._kbTab, -1);
+  });
+
   test('request: JSON body gets inferred content-type and echoes', async () => {
     const r = await rpc('request', {
       url: `${origin}/api/data`,
@@ -263,6 +340,61 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
     });
     assert.equal(r.status, 200);
     assert.match(r.contentType, /json/);
+  });
+
+  test('ws: connect → send → recv(ページコンテキストのソケット)と ws.log の観測', { timeout: 30_000 }, async () => {
+    await rpc('open', { url: `${origin}/page.html` });
+    const sock = await rpc('ws.connect', { url: `${origin.replace('http://', 'ws://')}/socket` });
+    assert.equal(sock.state, 'open');
+    assert.equal(typeof sock.id, 'number');
+
+    await rpc('ws.send', { id: sock.id, data: 'ping-1' });
+    // エコーが届くまでポーリング(受信バッファは --since カーソルで読む契約)
+    let entries: any[] = [];
+    for (let i = 0; i < 25 && !entries.length; i++) {
+      const r = await rpc('ws.recv', { id: sock.id, since: 0 });
+      entries = r.entries.filter((e: any) => e.kind === 'message');
+      if (!entries.length) await new Promise((res) => setTimeout(res, 200));
+    }
+    assert.equal(entries[0]?.data, 'echo:ping-1');
+    assert.equal(entries[0]?.binary, false);
+
+    // since で「続きから」だけ取れる
+    const after = await rpc('ws.recv', { id: sock.id, since: entries[0].seq });
+    assert.equal(after.entries.length, 0);
+
+    // 観測側(kb ws log)にも同じフレームが送受信の向き付きで載る
+    const log = await rpc('ws.log', { filter: '/socket' });
+    const events = (log.entries as any[]).map((e) => e.event);
+    assert.ok(events.includes('open'), `open が載るはず: ${events.join(',')}`);
+    assert.ok(events.includes('sent'), `sent が載るはず: ${events.join(',')}`);
+    const received = (log.entries as any[]).find((e) => e.event === 'received');
+    assert.equal(received?.payload, 'echo:ping-1');
+
+    const closed = await rpc('ws.close', { id: sock.id });
+    assert.equal(closed.closed, true);
+    const list = await rpc('ws.list', {});
+    assert.equal((list as any[]).find((s) => s.id === sock.id), undefined);
+  });
+
+  test('session.check: アプリ由来の 403 は target-protected と判定する', { timeout: 60_000 }, async () => {
+    const r = await rpc('session.check', { url: `${origin}/protected` });
+    assert.equal(r.verdict, 'target-protected');
+    const target = r.probes.find((p: any) => p.label === 'target');
+    assert.equal(target.status, 403);
+    assert.equal(target.challenged, false);
+    assert.equal(target.via, 'navigate');
+    // 対照(トップページ)も撃たれていること
+    assert.ok(r.probes.some((p: any) => p.label === 'root'));
+  });
+
+  test('session.check: bot チャレンジのマーカーがあれば degraded(403 を証拠にしない)', { timeout: 60_000 }, async () => {
+    const r = await rpc('session.check', { url: `${origin}/challenge` });
+    assert.equal(r.verdict, 'degraded');
+    const target = r.probes.find((p: any) => p.label === 'target');
+    assert.equal(target.challenged, true);
+    assert.equal(target.vendor, 'cloudflare');
+    assert.match(r.hint, /証拠/);
   });
 
   test('journal: command イベントは RPC 直後にディスクへ flush される', { timeout: 30_000 }, async () => {

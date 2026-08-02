@@ -5,9 +5,12 @@ import { DialogManager } from './host/dialogs';
 import { DownloadManager } from './host/downloads';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from './host/httpClient';
 import { attachOverCdp, launchOwned } from './host/launcher';
+import { checkSession, type SessionCheckResult } from './host/session';
 import { translateSegments } from './host/translate';
 import { TabRegistry } from './host/tabs';
+import { wsClose, wsConnect, wsList, wsRecv, wsSend, type WsSocketInfo } from './host/wsClient';
 import { NetMonitor } from './netMonitor';
+import { WsMonitor } from './wsMonitor';
 import { TargetResolver } from './targets';
 import {
   LOG_CAP,
@@ -48,6 +51,9 @@ export class BrowserHost {
   private tabs = new TabRegistry();
 
   private net = new NetMonitor();
+  private ws = new WsMonitor();
+  /** kb ws connect が張るページ内ソケットの ID 採番(タブをまたいで一意)。 */
+  private nextWsId = 1;
   private emulator = new Emulator();
   private targets = new TargetResolver();
   private consoleLog = new LogBuffer<ConsoleEntry>(LOG_CAP);
@@ -241,6 +247,7 @@ export class BrowserHost {
     void this.dialogs.watchClose(page, id);
 
     this.net.watchPage(page, id);
+    this.ws.watchPage(page, id);
     // ページのネットワーク活動を idle reaper へ通知する(headed でユーザーが直接操作 → ナビ →
     // リクエスト発生で延命される)。ログ蓄積は net.watchPage 側が別途行う。
     page.on('request', () => this.onActivity());
@@ -937,6 +944,10 @@ export class BrowserHost {
     return this.net.headers(seq);
   }
 
+  netExportHar(opts: { tab?: number; filter?: string; limit?: number } = {}): { log: Record<string, unknown> } {
+    return this.net.exportHar(opts);
+  }
+
   harStart(): { recording: boolean } {
     return this.net.harStart();
   }
@@ -949,14 +960,101 @@ export class BrowserHost {
     return this.net.harStatus();
   }
 
+  // ---- WebSocket (観測は WsMonitor、送受信はページ内ソケット) ----
+
+  wsLogQuery(opts: { tab?: number; since?: number; filter?: string; limit?: number }): ReturnType<WsMonitor['query']> {
+    return this.ws.query(opts);
+  }
+
+  wsClear(): void {
+    this.ws.clear();
+  }
+
+  /** 現在のタブのコンテキストで WebSocket を開く(Cookie / Origin / TLS はそのページのもの)。 */
+  async wsConnect(opts: { url: string; protocols?: string[]; timeoutMs?: number; tab?: number }): Promise<WsSocketInfo & { tab: number }> {
+    const { id: tab, page } = this.getPage(opts.tab);
+    // スキーム省略時は wss(WebSocket は https 相当が既定)
+    const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(opts.url) ? opts.url : `wss://${opts.url}`;
+    const info = await wsConnect(page, {
+      id: this.nextWsId++,
+      url,
+      protocols: opts.protocols,
+      timeoutMs: opts.timeoutMs ?? 15_000,
+    });
+    return { ...info, tab };
+  }
+
+  async wsSend(opts: { id: number; data: string; base64?: boolean; tab?: number }): Promise<{ id: number; bytes: number; state: string }> {
+    const { page } = this.getPage(opts.tab);
+    return wsSend(page, opts);
+  }
+
+  async wsRecv(opts: { id: number; since?: number; limit?: number; tab?: number }): Promise<Awaited<ReturnType<typeof wsRecv>>> {
+    const { page } = this.getPage(opts.tab);
+    return wsRecv(page, opts);
+  }
+
+  async wsList(tab?: number): Promise<WsSocketInfo[]> {
+    const { page } = this.getPage(tab);
+    return wsList(page);
+  }
+
+  async wsClose(opts: { id: number; code?: number; reason?: string; tab?: number }): Promise<{ id: number; closed: boolean }> {
+    const { page } = this.getPage(opts.tab);
+    return wsClose(page, opts);
+  }
+
+  // ---- セッション診断 ----
+
+  /**
+   * 「403 が返るのはこのパスが保護されているからか、それとも自分のセッションが切れただけか」を
+   * 対照付きで判定する。プローブは使い捨てタブから撃つ(ユーザーのタブ ID は動かない)。
+   */
+  async sessionCheck(opts: { url: string; api?: string; timeoutMs?: number }): Promise<
+    SessionCheckResult & {
+      apiAuto: boolean;
+      client: { profile: string; headless: boolean; channel: string; stealth: boolean; attached: boolean; userAgent?: string };
+    }
+  > {
+    const url = normalizeUrl(opts.url);
+    let host: string;
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      throw new Error(`URL として解釈できません: ${opts.url}`);
+    }
+    // --api 未指定なら、このセッションで実際に観測した同ホストの xhr/fetch を対照に使う
+    const apiUrl = opts.api ? normalizeUrl(opts.api) : this.net.lastApiUrlForHost(host);
+    const result = await checkSession(this.context, {
+      url,
+      apiUrl,
+      timeoutMs: opts.timeoutMs ?? 15_000,
+      profile: this.profile,
+    });
+    return {
+      ...result,
+      apiAuto: !opts.api && apiUrl != null,
+      client: {
+        profile: this.profile,
+        headless: this.headless,
+        channel: this.channel,
+        stealth: !!this.opts.stealth,
+        attached: this.attached,
+        userAgent: this.opts.userAgent,
+      },
+    };
+  }
+
   // ---- HTTP リクエスト (ページ非依存のミニ REST クライアント) ----
 
   /**
    * ブラウザの context.request で HTTP リクエストを送る。ページを開かずに API を叩ける。
    * Cookie はブラウザと共有され(Set-Cookie も反映される)、プロキシ設定も同じものを使う。
+   * ページイベントに乗らない通信なので、通信ログには NetMonitor へ明示的に記録する
+   * (kb net log に出て、kb net body / kb net export の HAR にも含まれる)。
    */
   async httpRequest(opts: HttpRequestOptions): Promise<HttpResult> {
-    return httpRequest(this.context, opts);
+    return httpRequest(this.context, opts, (ex) => this.net.recordExternalRequest(ex));
   }
 
   // ---- コンソール (DevTools Console 相当) ----

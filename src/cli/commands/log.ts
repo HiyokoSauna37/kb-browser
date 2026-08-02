@@ -10,6 +10,7 @@ import {
   stepsMarkdown,
   toCliString,
   type CommandEvent,
+  type JwtMaskMode,
   type MaskOptions,
   type OpEvent,
   type SessionMeta,
@@ -23,13 +24,19 @@ interface MaskCliOpts {
   mask?: boolean;
   allow?: string;
   deny?: string;
+  maskJwt?: string;
 }
 
+const JWT_MODES: JwtMaskMode[] = ['signature', 'full', 'off'];
+
 function maskOptions(opts: MaskCliOpts): MaskOptions {
+  const jwt = (opts.maskJwt ?? 'signature') as JwtMaskMode;
+  if (!JWT_MODES.includes(jwt)) throw new Error(`--mask-jwt は ${JWT_MODES.join(' | ')} のいずれかです (指定: ${opts.maskJwt})`);
   return {
     mask: opts.mask !== false,
     allow: opts.allow ? new RegExp(opts.allow, 'i') : undefined,
     deny: opts.deny ? new RegExp(opts.deny, 'i') : undefined,
+    jwt,
   };
 }
 
@@ -38,7 +45,8 @@ function withMaskOpts(cmd: Command): Command {
   return cmd
     .option('--no-mask', '機微な値のマスクを解除する(既定はマスク)')
     .option('--allow <regex>', 'この正規表現に一致する名前はマスクしない')
-    .option('--deny <regex>', 'この正規表現に一致する名前・値を追加でマスクする');
+    .option('--deny <regex>', 'この正規表現に一致する名前・値を追加でマスクする')
+    .option('--mask-jwt <mode>', 'JWT の扱い: signature=署名部のみ / full=全体 / off=形状マスクしない', 'signature');
 }
 
 function listSessionDirs(): { name: string; dir: string; meta: SessionMeta | null }[] {
@@ -222,9 +230,9 @@ export function registerLogCommands(program: Command): void {
         for (const f of reqs) fs.writeFileSync(path.join(outDir, 'requests', f.name), f.content);
 
         print(
-          { out: outDir, events: events.length, requests: reqs.length, shots: shotMap.size, masked: mask.mask ? true : false },
+          { out: outDir, events: events.length, requests: reqs.length, shots: shotMap.size, masked: mask.mask ? true : false, maskJwt: mask.jwt },
           (r) =>
-            `${r.out}\n(events=${r.events}, requests=${r.requests}, shots=${r.shots}, マスク=${r.masked ? '適用' : '解除'})\nreport.md から読み始めてください`,
+            `${r.out}\n(events=${r.events}, requests=${r.requests}, shots=${r.shots}, マスク=${r.masked ? '適用' : '解除'}, JWT=${r.maskJwt})\nreport.md から読み始めてください`,
         );
       }),
     );

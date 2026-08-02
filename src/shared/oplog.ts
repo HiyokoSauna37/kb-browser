@@ -65,6 +65,15 @@ export interface SessionMeta {
 // percent-encode されても読める ASCII マーカー(入れ子 URL 内で «masked» が %25C2%25AB… に化ける問題への対処)
 export const MASK = '[MASKED]';
 
+/**
+ * JWT のマスク方針。
+ * - signature: 署名部だけを潰す(ヘッダ・クレームは残す)。クレーム(sub/exp/iss/aud)は
+ *   レポートの証拠そのもので、再利用を可能にしているのは署名部だけ、という考え方の既定値。
+ * - full: JWT 全体を潰す(クレームにも出せない情報が入る場合)。
+ * - off: JWT の形状ベースのマスクをしない(キー名・ヘッダ名による既定マスクは効いたまま)。
+ */
+export type JwtMaskMode = 'signature' | 'full' | 'off';
+
 export interface MaskOptions {
   /** 既定 true。false(--no-mask)でも deny 指定は常に適用される。 */
   mask: boolean;
@@ -72,12 +81,51 @@ export interface MaskOptions {
   allow?: RegExp;
   /** この正規表現に一致する名前・値は追加でマスクする(全文字列が対象)。 */
   deny?: RegExp;
+  /** JWT の扱い(既定 signature)。 */
+  jwt?: JwtMaskMode;
 }
 
-/** 既定でマスクするヘッダ名。 */
-const SENSITIVE_HEADER_RE = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth[\w-]*|x-csrf[\w-]*|x-xsrf[\w-]*)$/i;
+/**
+ * 既定でマスクするヘッダ名。`x-<なにか>-token` 系(X-Validation-Token / X-Request-Signature /
+ * X-Amz-Security-Token など、サイト固有の命名)を語幹で拾う。
+ */
+const SENSITIVE_HEADER_RE =
+  /^(authorization|proxy-authorization|www-authenticate|cookie|set-cookie|api[-_]?key|x-[\w-]*(api[-_]?key|token|secret|signature|sign|auth|session|jwt|csrf|xsrf|pass(word)?)[\w-]*)$/i;
 /** ボディ内で値をマスクするキー名。 */
-const SENSITIVE_KEY_RE = /pass(word)?|token|secret|otp|api[-_]?key|credential|session|auth/i;
+const SENSITIVE_KEY_RE = /pass(word)?|token|secret|otp|api[-_]?key|credential|session|auth|jwt|signature/i;
+
+/**
+ * JWT(base64url の 3 セグメント。alg:none の署名なしも拾えるよう末尾は 0 文字以上)。
+ * キー名やヘッダ名に依らず**値の形状**で拾うので、`{"assertion":"eyJ…"}` のように
+ * 機微キー名を持たない場所に載った JWT も検出できる。
+ */
+// 署名部の手前の否定先読みは二重適用よけ: マスク済みの JWT を再度マスクして
+// "….[MASKED][MASKED]" にしないため(redactEvent は複数の経路から同じ文字列に触る)。
+const MASK_PATTERN = MASK.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const JWT_RE = new RegExp(`eyJ[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{4,}\\.(?!${MASK_PATTERN})[A-Za-z0-9_-]*`, 'g');
+
+/** 文字列中の JWT をマスク方針に従って処理する(既定は署名部のみ)。 */
+export function maskJwts(text: string, o: MaskOptions): string {
+  const mode = o.jwt ?? 'signature';
+  if (!o.mask || mode === 'off' || !text) return text;
+  return text.replace(JWT_RE, (m) => {
+    if (mode === 'full') return MASK;
+    const [header, payload] = m.split('.');
+    return `${header}.${payload}.${MASK}`;
+  });
+}
+
+/** 構造(オブジェクト / 配列)の中の全文字列に JWT マスクを適用する。 */
+function maskJwtsDeep<T>(value: T, o: MaskOptions): T {
+  if (typeof value === 'string') return maskJwts(value, o) as unknown as T;
+  if (Array.isArray(value)) return value.map((v) => maskJwtsDeep(v, o)) as unknown as T;
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = maskJwtsDeep(v, o);
+    return out as unknown as T;
+  }
+  return value;
+}
 
 /** 名前付きの値をマスク方針に従って処理する。allow > deny > 既定マスクの順で判定。 */
 function maskValue(name: string, value: string, o: MaskOptions): string {
@@ -141,9 +189,10 @@ function redactHeaders(headers: Record<string, string>, o: MaskOptions): Record<
   for (const [name, value] of Object.entries(headers)) {
     if (SENSITIVE_HEADER_RE.test(name)) out[name] = maskValue(name, value, o);
     else if (o.deny && (o.deny.test(name) || o.deny.test(value))) out[name] = MASK;
-    else if (/^(location|referer|refresh)$/i.test(name)) out[name] = maskUrlsInText(value, o);
-    else if (name === ':path') out[name] = maskPath(value, o); // HTTP/2 擬似ヘッダはパス+クエリを運ぶ
-    else out[name] = value;
+    else if (/^(location|referer|refresh)$/i.test(name)) out[name] = maskJwts(maskUrlsInText(value, o), o);
+    else if (name === ':path') out[name] = maskJwts(maskPath(value, o), o); // HTTP/2 擬似ヘッダはパス+クエリを運ぶ
+    // 機微ヘッダ名に当たらないヘッダでも、値が JWT なら形状で拾う(サイト固有の命名対策)
+    else out[name] = maskJwts(value, o);
   }
   return out;
 }
@@ -163,6 +212,8 @@ export function maskBody(data: string, o: MaskOptions): string {
           out[k] =
             typeof val === 'string' && SENSITIVE_KEY_RE.test(k) ? maskValue(k, val, o)
             : typeof val === 'string' && o.deny?.test(val) ? MASK
+            // キー名が機微でなくても、値が JWT なら形状で拾う
+            : typeof val === 'string' ? maskJwts(val, o)
             : walk(val);
         }
         return out;
@@ -180,25 +231,26 @@ export function maskBody(data: string, o: MaskOptions): string {
         const eq = pair.indexOf('=');
         const k = pair.slice(0, eq);
         const v = pair.slice(eq + 1);
-        return SENSITIVE_KEY_RE.test(k) || o.deny?.test(v) ? `${k}=${maskValue(k, v, o)}` : pair;
+        return SENSITIVE_KEY_RE.test(k) || o.deny?.test(v) ? `${k}=${maskValue(k, v, o)}` : `${k}=${maskJwts(v, o)}`;
       })
       .join('&');
   }
-  return o.deny?.test(data) ? MASK : data;
+  return o.deny?.test(data) ? MASK : maskJwts(data, o);
 }
 
 /** イベント 1 件にマスクを適用する(元オブジェクトは変更しない)。 */
 export function redactEvent(event: OpEvent, o: MaskOptions): OpEvent {
   const e = JSON.parse(JSON.stringify(event)) as OpEvent;
   if (e.type === 'net') {
-    e.url = maskUrl(e.url, o);
+    // URL のパスセグメントやクエリに JWT が載ることがあるため、クエリキー判定に加えて形状でも拾う
+    e.url = maskJwts(maskUrl(e.url, o), o);
     if (e.requestHeaders) e.requestHeaders = redactHeaders(e.requestHeaders, o);
-    if (e.postData != null) e.postData = maskUrlsInText(maskBody(e.postData, o), o);
+    if (e.postData != null) e.postData = maskJwts(maskUrlsInText(maskBody(e.postData, o), o), o);
     return e;
   }
   if (e.type === 'console') {
     if (o.deny?.test(e.text)) e.text = MASK;
-    else e.text = maskUrlsInText(e.text, o);
+    else e.text = maskJwts(maskUrlsInText(e.text, o), o);
     return e;
   }
   const args = e.args as Record<string, any>;
@@ -220,6 +272,10 @@ export function redactEvent(event: OpEvent, o: MaskOptions): OpEvent {
       break;
     case 'cookies.set':
       if (args.cookie?.value != null) args.cookie.value = maskValue('cookie.value', String(args.cookie.value), o);
+      break;
+    case 'ws.send':
+      // WebSocket のフレームは認証トークン(socket.io の bullet 等)を運ぶことが多い
+      if (typeof args.data === 'string') args.data = maskBody(args.data, o);
       break;
     case 'eval':
       if (e.result != null) e.result = maskValue('eval.result', e.result, o);
@@ -272,6 +328,10 @@ export function redactEvent(event: OpEvent, o: MaskOptions): OpEvent {
     }
     if (e.result && o.deny.test(e.result)) e.result = MASK;
   }
+  // 個別処理で拾えなかった場所(eval の式、URL のパスセグメント、任意のネスト引数)に
+  // 残った JWT を形状で潰す。既にマスク済みの値には JWT が残っていないので二重適用は無害。
+  for (const [k, v] of Object.entries(args)) args[k] = maskJwtsDeep(v, o);
+  if (e.result != null) e.result = maskJwts(e.result, o);
   return e;
 }
 
@@ -395,6 +455,14 @@ export function toCliString(e: CommandEvent): string {
       return 'kb cookies clear';
     case 'storage.restore':
       return 'kb storage restore <file>';
+    case 'ws.connect':
+      return `kb ws connect ${q(a.url)}${a.tab != null ? ` -t ${a.tab}` : ''}`;
+    case 'ws.send':
+      return `kb ws send ${a.id} ${q(a.data)}${a.base64 ? ' --base64' : ''}`;
+    case 'ws.close':
+      return `kb ws close ${a.id}`;
+    case 'session.check':
+      return `kb session check ${q(a.url)}${a.api ? ` --api ${q(a.api)}` : ''}`;
     case 'net.block':
       return `kb net block ${q(a.pattern)}`;
     case 'net.mock':

@@ -48,8 +48,49 @@ export interface HttpResult {
   hops?: RedirectHop[];
 }
 
+/**
+ * 送受信 1 往復の生の記録。kb request はページイベントに乗らないため、
+ * これを NetMonitor に渡して通信ログ(= kb net log / kb net export の HAR)に載せる。
+ * requestHeaders は「こちらが渡したヘッダ」で、APIRequestContext が自動付与する
+ * Cookie / User-Agent 等は含まれない(取得手段がない)。
+ */
+export interface RecordedExchange {
+  method: string;
+  url: string;
+  status: number;
+  statusText: string;
+  requestHeaders?: Record<string, string>;
+  postData?: string;
+  responseHeaders: Record<string, string>;
+  body?: Buffer;
+  ms?: number;
+}
+
+export type ExchangeRecorder = (ex: RecordedExchange) => void;
+
+/** 記録に必要な「送った側」の情報(レスポンスからは取れないため呼び出し側から引き回す)。 */
+interface RecordContext {
+  onRecord?: ExchangeRecorder;
+  method: string;
+  headers?: Record<string, string>;
+  data?: string;
+}
+
 /** ブラウザ既定と同じ上限。ここに達したら最後のレスポンスをそのまま返す(追従を打ち切る)。 */
 const MAX_REDIRECTS = 20;
+
+/**
+ * res.headers() は複数値ヘッダ(Set-Cookie)を畳んで parse 不能にするため、
+ * headersArray() から改行区切りで組み直す(CDP / allHeaders と同じ表現)。
+ */
+function headersRecord(res: APIResponse): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { name, value } of res.headersArray()) {
+    const key = name.toLowerCase();
+    out[key] = out[key] === undefined ? value : `${out[key]}\n${value}`;
+  }
+  return out;
+}
 
 /** res.headers() は複数 Set-Cookie を 1 つに畳むため、headersArray() から個別に取り出す。 */
 function extractSetCookies(res: APIResponse): string[] {
@@ -83,10 +124,27 @@ function stripBodyHeaders(headers?: Record<string, string>): Record<string, stri
 }
 
 /** APIResponse から HttpResult を組み立てる(本文の保存 / バイナリ判定 / 切り詰めを含む)。 */
-async function buildResult(res: APIResponse, ms: number, opts: HttpRequestOptions, hops?: RedirectHop[]): Promise<HttpResult> {
+async function buildResult(
+  res: APIResponse,
+  ms: number,
+  opts: HttpRequestOptions,
+  hops?: RedirectHop[],
+  rec?: RecordContext,
+): Promise<HttpResult> {
   const buf = await res.body().catch(() => Buffer.alloc(0)); // 204 等の空レスポンス
   const headers = res.headers();
   const setCookies = extractSetCookies(res);
+  rec?.onRecord?.({
+    method: rec.method,
+    url: res.url(),
+    status: res.status(),
+    statusText: res.statusText(),
+    requestHeaders: rec.headers,
+    postData: rec.data,
+    responseHeaders: headersRecord(res),
+    body: buf,
+    ms,
+  });
   const contentType = headers['content-type'] ?? '';
   const base = {
     status: res.status(),
@@ -130,6 +188,7 @@ async function followVerbose(
   headersToSend: Record<string, string> | undefined,
   timeout: number,
   started: number,
+  onRecord?: ExchangeRecorder,
 ): Promise<HttpResult> {
   const hops: RedirectHop[] = [];
   let url = normalizeUrl(opts.url);
@@ -154,6 +213,16 @@ async function followVerbose(
     if (status >= 300 && status < 400 && location && i < MAX_REDIRECTS) {
       hops.push({ status, statusText: res.statusText(), url, location, ...(setCookies.length ? { setCookies } : {}) });
       const next = new URL(location, url).toString(); // 相対 Location を現在 URL 基準で解決
+      // 中間ホップも通信ログに載せる(リダイレクト途中で撒かれた Cookie の証跡が HAR に残る)
+      onRecord?.({
+        method,
+        url,
+        status,
+        statusText: res.statusText(),
+        requestHeaders: headers,
+        postData: data,
+        responseHeaders: headersRecord(res),
+      });
       res.dispose().catch(() => {});
       const after = methodAfterRedirect(status, method);
       method = after.method;
@@ -164,7 +233,7 @@ async function followVerbose(
       url = next;
       continue;
     }
-    return await buildResult(res, Date.now() - started, opts, hops);
+    return await buildResult(res, Date.now() - started, opts, hops, { onRecord, method, headers, data });
   }
 }
 
@@ -172,7 +241,11 @@ async function followVerbose(
  * ブラウザの context.request で HTTP リクエストを送る(ページ非依存のミニ REST クライアント)。
  * Cookie はブラウザと共有され(Set-Cookie も反映される)、プロキシ設定も同じものを使う。
  */
-export async function httpRequest(context: BrowserContext, opts: HttpRequestOptions): Promise<HttpResult> {
+export async function httpRequest(
+  context: BrowserContext,
+  opts: HttpRequestOptions,
+  onRecord?: ExchangeRecorder,
+): Promise<HttpResult> {
   const started = Date.now();
   // JSON に見えるボディで Content-Type 未指定なら application/json を補う(明示ヘッダ優先)
   const inferred = inferJsonContentType(opts.data, opts.headers);
@@ -181,16 +254,22 @@ export async function httpRequest(context: BrowserContext, opts: HttpRequestOpti
 
   // --follow-verbose はリダイレクトを追う設定のときだけ意味を持つ(--no-follow とは併用しない)。
   if (opts.verbose && opts.follow !== false) {
-    return followVerbose(context, opts, headersToSend, timeout, started);
+    return followVerbose(context, opts, headersToSend, timeout, started, onRecord);
   }
 
+  const method = (opts.method ?? 'GET').toUpperCase();
   const res = await context.request.fetch(normalizeUrl(opts.url), {
-    method: (opts.method ?? 'GET').toUpperCase(),
+    method,
     headers: headersToSend,
     data: opts.data,
     timeout,
     maxRedirects: opts.follow === false ? 0 : undefined,
     failOnStatusCode: false,
   });
-  return buildResult(res, Date.now() - started, opts);
+  return buildResult(res, Date.now() - started, opts, undefined, {
+    onRecord,
+    method,
+    headers: headersToSend,
+    data: opts.data,
+  });
 }

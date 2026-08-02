@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { headersWithSetCookie, hhmmss, redirectHopLines, setCookieLines, truncSpan } from './format';
+import { fmtDuration, headersWithSetCookie, hhmmss, redirectHopLines, setCookieLines, truncSpan } from './format';
 
 test('hhmmss: ISO タイムスタンプから時刻部を取り出す', () => {
   assert.equal(hhmmss('2026-07-10T12:34:56.789Z'), '12:34:56');
@@ -55,4 +55,13 @@ test('redirectHopLines: ホップの Set-Cookie はインデントして配下�
 test('redirectHopLines: Location 欠落時も壊れない', () => {
   const hops = [{ status: 300, statusText: 'Multiple Choices', url: 'https://ex.com/' }];
   assert.equal(redirectHopLines(hops), 'HTTP 300 Multiple Choices  https://ex.com/  →  (Location なし)');
+});
+
+test('fmtDuration: 秒/分/時/日で丸め、期限切れは符号を残す', () => {
+  assert.equal(fmtDuration(45), '45s');
+  assert.equal(fmtDuration(90), '1m');
+  assert.equal(fmtDuration(8040), '2h14m');
+  assert.equal(fmtDuration(7200), '2h');
+  assert.equal(fmtDuration(90000), '1d1h');
+  assert.equal(fmtDuration(-30), '-30s'); // 期限切れを「0」に丸めて隠さない
 });

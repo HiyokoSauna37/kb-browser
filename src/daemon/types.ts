@@ -73,6 +73,20 @@ export interface NetEntry {
   failure?: string;
 }
 
+/** WebSocket のフレーム/接続イベント(kb ws log。DevTools の Messages タブ相当)。 */
+export interface WsEntry {
+  seq: number;
+  ts: string;
+  tab: number;
+  url: string;
+  event: 'open' | 'sent' | 'received' | 'close' | 'error';
+  /** フレーム本文(バイナリは base64)。上限で切り詰める。 */
+  payload?: string;
+  binary?: boolean;
+  truncated?: boolean;
+  error?: string;
+}
+
 export interface ConsoleEntry {
   seq: number;
   ts: string;

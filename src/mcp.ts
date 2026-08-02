@@ -281,6 +281,105 @@ tool(
 );
 
 tool(
+  'kb_net_export',
+  '捕捉済みの通信ログを HAR ファイル(HAR 1.2)に書き出す。事前準備なしで今バッファにあるものを出せる(Burp / Caido などに読み込める)。本文はテキスト系のみ 256KB まで、ヘッダは直近 2000 レスポンス分。',
+  {
+    path: z.string().describe('出力先ファイルパス (.har)'),
+    filter: z.string().optional().describe('URL の正規表現フィルタ'),
+    limit: z.number().int().optional().describe('末尾から書き出す件数(既定は捕捉済みすべて)'),
+    tab,
+  },
+  safe(async ({ path: outPath, filter, limit, tab }) => {
+    const harData = await rpc('net.export', { filter, limit, tab });
+    const resolved = path.resolve(outPath);
+    fs.writeFileSync(resolved, JSON.stringify(harData, null, 2));
+    const entries = harData.log.entries as any[];
+    return text({ path: resolved, entries: entries.length, withBody: entries.filter((e) => e.response?.content?.text != null).length });
+  }),
+);
+
+tool(
+  'kb_session_check',
+  'その URL の応答が「対象パスの性質」か「自分のセッション劣化(Cookie 失効 / bot チャレンジ)」かを、トップページとの対照で判定する。403 を negative 証拠として読む前に必ず確認する。プローブは実タブから撃つのでブラウザと同じ経路。',
+  {
+    url: z.string().describe('診断対象の URL'),
+    api: z.string().optional().describe('対照に使う API の URL(省略時は観測済みの同ホスト xhr/fetch を自動選択)'),
+    timeoutSec: z.number().optional().describe('各プローブのタイムアウト秒(既定 15)'),
+  },
+  safe(async ({ url, api, timeoutSec }) =>
+    text(await rpc('session.check', { url, api, timeoutMs: (timeoutSec ?? 15) * 1000 })),
+  ),
+);
+
+tool(
+  'kb_ws_log',
+  'ページが送受信した WebSocket フレームを取得する(DevTools の Messages 相当)。socket.io 等の framing をそのまま観測できる。',
+  {
+    filter: z.string().optional().describe('ソケット URL の正規表現フィルタ'),
+    limit: z.number().int().optional().describe('最大件数(既定 50)'),
+    tab,
+  },
+  safe(async ({ filter, limit, tab }) => text((await rpc('ws.log', { filter, limit: limit ?? NET_LOG_DEFAULT_LIMIT, tab })).entries)),
+);
+
+tool(
+  'kb_ws_connect',
+  '現在のタブのコンテキストで WebSocket を開く(Cookie / Origin / TLS はそのページのもの)。対象サイトのページを開いた状態で使う。返る id を send / recv に渡す。ページ遷移でソケットは失われる。',
+  {
+    url: z.string().describe('接続先 (wss://…)'),
+    protocols: z.array(z.string()).optional().describe('サブプロトコル'),
+    timeoutSec: z.number().optional().describe('接続タイムアウト秒(既定 15)'),
+    tab,
+  },
+  safe(async ({ url, protocols, timeoutSec, tab }) =>
+    text(await rpc('ws.connect', { url, protocols, timeoutMs: (timeoutSec ?? 15) * 1000, tab })),
+  ),
+);
+
+tool(
+  'kb_ws_send',
+  '開いている WebSocket にフレームを送る。',
+  {
+    id: z.number().int().describe('kb_ws_connect が返したソケット id'),
+    data: z.string().describe('送信本文'),
+    base64: z.boolean().optional().describe('data を base64 として解釈しバイナリフレームで送る'),
+    tab,
+  },
+  safe(async ({ id, data, base64, tab }) => text(await rpc('ws.send', { id, data, base64, tab }))),
+);
+
+tool(
+  'kb_ws_recv',
+  'ソケットの受信メッセージを読む(since より後だけ。バッファは消費しないのでカーソルで進める)。',
+  {
+    id: z.number().int().describe('ソケット id'),
+    since: z.number().int().optional().describe('この seq より後だけ取得する'),
+    limit: z.number().int().optional().describe('最大件数(既定 50)'),
+    tab,
+  },
+  safe(async ({ id, since, limit, tab }) => text(await rpc('ws.recv', { id, since, limit: limit ?? NET_LOG_DEFAULT_LIMIT, tab }))),
+);
+
+tool(
+  'kb_ws_list',
+  'このタブで kb が開いている WebSocket の一覧(id / 状態 / 受信 seq)。',
+  { tab },
+  safe(async ({ tab }) => text(await rpc('ws.list', { tab }))),
+);
+
+tool(
+  'kb_ws_close',
+  'WebSocket を閉じる。',
+  {
+    id: z.number().int().describe('ソケット id'),
+    code: z.number().int().optional().describe('クローズコード'),
+    reason: z.string().optional().describe('クローズ理由'),
+    tab,
+  },
+  safe(async ({ id, code, reason, tab }) => text(await rpc('ws.close', { id, code, reason, tab }))),
+);
+
+tool(
   'kb_request',
   'ページを開かずに HTTP リクエストを送る(ミニ REST クライアント)。Cookie とプロキシ設定はブラウザと共有され、Set-Cookie も反映される。レスポンスの Set-Cookie は常に表示し、全レスポンスヘッダは includeHeaders で表示する。followVerbose でリダイレクト各ホップの status/Location/Set-Cookie を表示する。',
   {

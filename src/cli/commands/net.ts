@@ -11,12 +11,30 @@ const FOLLOW_INTERVAL_MS = 700;
 
 function fmtNetEntry(e: any): string {
   const status = e.event === 'requestfailed' ? `FAIL(${e.failure ?? '?'})` : (e.status ?? '…');
+  // kb request はページに属さない通信なのでタブ ID が無い(-1 で記録される)
+  const tab = e.tab < 0 ? '-' : e.tab;
   // 行頭の #seq は kb net body <seq> に渡せる(本文は response 行に対して捕捉される)
-  return `#${String(e.seq).padEnd(5)} ${hhmmss(e.ts)} [${e.tab}] ${String(e.method).padEnd(6)} ${String(status).padEnd(4)} ${e.resourceType.padEnd(10)} ${e.url}`;
+  return `#${String(e.seq).padEnd(5)} ${hhmmss(e.ts)} [${tab}] ${String(e.method).padEnd(6)} ${String(status).padEnd(4)} ${e.resourceType.padEnd(10)} ${e.url}`;
 }
 
 function fmtConsoleEntry(e: any): string {
   return `${hhmmss(e.ts)} [${e.tab}] [${e.kind}] ${e.text}`;
+}
+
+/** WebSocket の観測ログ 1 行(送受信は矢印で向きを出す)。 */
+function fmtWsEntry(e: any): string {
+  const arrow = e.event === 'sent' ? '→' : e.event === 'received' ? '←' : ' ';
+  const body =
+    e.event === 'sent' || e.event === 'received'
+      ? `${e.binary ? '(binary base64) ' : ''}${e.payload ?? ''}${e.truncated ? ' …(切り詰め)' : ''}`
+      : `${e.url}${e.error ? ` — ${e.error}` : ''}`;
+  return `#${String(e.seq).padEnd(5)} ${hhmmss(e.ts)} [${e.tab}] ${arrow} ${String(e.event).padEnd(8)} ${body}`;
+}
+
+/** kb が開いたソケットの受信メッセージ 1 行。 */
+function fmtWsMessage(m: any): string {
+  const kind = m.kind === 'message' ? '←' : `[${m.kind}]`;
+  return `#${String(m.seq).padEnd(4)} ${hhmmss(m.ts)} ${kind} ${m.binary ? '(binary base64) ' : ''}${m.data}${m.truncated ? ' …(切り詰め)' : ''}`;
 }
 
 /**
@@ -24,7 +42,7 @@ function fmtConsoleEntry(e: any): string {
  * forSec を指定すると指定秒数で自動終了する(エージェントはこちらを使う)。
  */
 async function followLog(
-  cmd: 'net.log' | 'console.log',
+  cmd: 'net.log' | 'console.log' | 'ws.log' | 'ws.recv',
   baseArgs: Record<string, unknown>,
   format: (e: any) => string,
   forSec?: number,
@@ -115,6 +133,32 @@ export function registerNetCommands(program: Command): void {
             Object.entries(h).map(([k, v]) => `${k}: ${v}`).join('\n') || '(なし)';
           return `# ${r.method} ${r.url}\n\n── request headers ──\n${fmt(r.request)}\n\n── response headers (${r.status}) ──\n${fmt(r.response)}`;
         });
+      }),
+    );
+
+  net
+    .command('export')
+    .description('捕捉済みの通信ログを HAR ファイルに書き出す(事前準備不要。Burp / Caido / bb ツールに読み込める)')
+    .option('--format <fmt>', '出力形式 (har)', 'har')
+    .option('-o, --out <path>', '出力先', 'kb-net.har')
+    .option('--filter <regex>', 'URL を正規表現で絞り込む')
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .option('-n, --limit <n>', '末尾から書き出す件数(既定は捕捉済みすべて)', intOpt)
+    .action(
+      run(async (opts: { format: string; out: string; filter?: string; tab?: number; limit?: number }) => {
+        if (opts.format !== 'har') throw new Error(`未対応の形式です: ${opts.format}(現在は har のみ)`);
+        const harData = await rpc('net.export', { filter: opts.filter, tab: opts.tab, limit: opts.limit });
+        const outPath = path.resolve(opts.out);
+        fs.writeFileSync(outPath, JSON.stringify(harData, null, 2));
+        const entries: any[] = harData.log.entries as any[];
+        const withBody = entries.filter((e) => e.response?.content?.text != null).length;
+        const withHeaders = entries.filter((e) => e.request?.headers?.length).length;
+        print(
+          { path: outPath, entries: entries.length, withHeaders, withBody },
+          (r) =>
+            `${r.path} (${r.entries} entries, ヘッダあり ${r.withHeaders}, 本文あり ${r.withBody})\n` +
+            '(捕捉済みバッファからの合成: 本文はテキスト系のみ 256KB まで、ヘッダは直近 2000 レスポンス分。完全な記録が要る場合は kb net har start を先に実行)',
+        );
       }),
     );
 
@@ -227,6 +271,106 @@ export function registerNetCommands(program: Command): void {
         print(result, (r) =>
           r.recording ? `記録中 (${r.entries} entries${r.truncated ? ', 上限到達で打ち切り' : ''})` : '記録していません',
         );
+      }),
+    );
+
+  const ws = program.command('ws').description('WebSocket の観測と送受信(ブラウザのセッション・Cookie をそのまま使う)');
+
+  ws
+    .command('log', { isDefault: true })
+    .description('ページが送受信した WebSocket フレームを表示する(DevTools の Messages 相当)')
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .option('--filter <regex>', 'ソケット URL を正規表現で絞り込む')
+    .option('-n, --limit <n>', '表示件数', intOpt, NET_LOG_DEFAULT_LIMIT)
+    .option('-f, --follow', '新着を流し続ける (Ctrl+C で終了。エージェントは --for と併用)')
+    .option('--for <sec>', 'follow を指定秒数で自動終了する', intOpt)
+    .option('--clear', 'ログを消去する')
+    .action(
+      run(async (opts: { tab?: number; filter?: string; limit: number; follow?: boolean; for?: number; clear?: boolean }) => {
+        if (opts.clear) {
+          await rpc('ws.clear');
+          return print({ cleared: true }, () => 'cleared');
+        }
+        const baseArgs = { tab: opts.tab, filter: opts.filter, limit: opts.limit };
+        if (opts.follow) return followLog('ws.log', baseArgs, fmtWsEntry, opts.for);
+        const { entries } = await rpc('ws.log', baseArgs);
+        print(entries, (list: any[]) => (list.length ? list.map(fmtWsEntry).join('\n') : 'WebSocket のログはありません'));
+      }),
+    );
+
+  ws
+    .command('connect <url>')
+    .description('現在のタブのコンテキストで WebSocket を開く(Cookie / Origin / TLS はそのページのもの。対象サイトのページを開いた状態で使う)')
+    .option('--protocol <name...>', 'サブプロトコル (Sec-WebSocket-Protocol)')
+    .option('--timeout <sec>', '接続タイムアウト秒', intOpt, 15)
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .action(
+      run(async (url: string, opts: { protocol?: string[]; timeout: number; tab?: number }) => {
+        const r = await rpc('ws.connect', { url, protocols: opts.protocol, timeoutMs: opts.timeout * 1000, tab: opts.tab });
+        print(r, (x) => `ソケット ${x.id} を開きました (${x.state}) — ${x.url}\n受信は kb ws recv ${x.id}、送信は kb ws send ${x.id} '<data>'`);
+      }),
+    );
+
+  ws
+    .command('send <id> [data]')
+    .description('開いているソケットにフレームを送る(--file で本文をファイルから、--base64 でバイナリ)')
+    .option('--file <path>', '送信本文のファイル')
+    .option('--base64', 'data を base64 として解釈しバイナリフレームで送る')
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .action(
+      run(async (idStr: string, data: string | undefined, opts: { file?: string; base64?: boolean; tab?: number }) => {
+        const body = opts.file ? fs.readFileSync(path.resolve(opts.file), 'utf8') : data;
+        if (body === undefined) throw new Error('送信する本文を引数か --file で指定してください');
+        const r = await rpc('ws.send', { id: intOpt(idStr), data: body, base64: opts.base64, tab: opts.tab });
+        print(r, (x) => `送信しました (${x.bytes} bytes)`);
+      }),
+    );
+
+  ws
+    .command('recv <id>')
+    .description('ソケットの受信メッセージを読む(--since で続きから。バッファは消費しない)')
+    .option('--since <seq>', 'この seq より後だけ表示する', intOpt)
+    .option('-n, --limit <n>', '表示件数', intOpt, NET_LOG_DEFAULT_LIMIT)
+    .option('-f, --follow', '新着を流し続ける (Ctrl+C で終了。エージェントは --for と併用)')
+    .option('--for <sec>', 'follow を指定秒数で自動終了する', intOpt)
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .action(
+      run(async (idStr: string, opts: { since?: number; limit: number; follow?: boolean; for?: number; tab?: number }) => {
+        const id = intOpt(idStr);
+        if (opts.follow) return followLog('ws.recv', { id, tab: opts.tab, limit: opts.limit }, fmtWsMessage, opts.for);
+        const r = await rpc('ws.recv', { id, since: opts.since, limit: opts.limit, tab: opts.tab });
+        print(r, (x) => {
+          const head = `# socket ${x.id} (${x.state}) — ${x.url}${x.dropped ? `  (!) ${x.dropped} 件をバッファ超過で取りこぼし` : ''}`;
+          return `${head}\n${x.entries.length ? x.entries.map(fmtWsMessage).join('\n') : '(新着なし)'}`;
+        });
+      }),
+    );
+
+  ws
+    .command('list')
+    .description('このタブで kb が開いているソケットの一覧')
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .action(
+      run(async (opts: { tab?: number }) => {
+        const list = await rpc('ws.list', { tab: opts.tab });
+        print(list, (l: any[]) =>
+          l.length
+            ? l.map((s) => `[${s.id}] ${s.state.padEnd(10)} seq=${s.lastSeq} buffered=${s.buffered}${s.dropped ? ` dropped=${s.dropped}` : ''}  ${s.url}`).join('\n')
+            : 'このタブに kb が開いたソケットはありません(ページ遷移すると失われます)',
+        );
+      }),
+    );
+
+  ws
+    .command('close <id>')
+    .description('ソケットを閉じる')
+    .option('--code <n>', 'クローズコード', intOpt)
+    .option('--reason <text>', 'クローズ理由')
+    .option('-t, --tab <id>', '対象タブ ID', intOpt)
+    .action(
+      run(async (idStr: string, opts: { code?: number; reason?: string; tab?: number }) => {
+        const r = await rpc('ws.close', { id: intOpt(idStr), code: opts.code, reason: opts.reason, tab: opts.tab });
+        print(r, (x) => `ソケット ${x.id} を閉じました`);
       }),
     );
 

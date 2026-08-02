@@ -26,6 +26,13 @@ export const LAST_RUN_PATH = path.join(KB_HOME, 'last-run.json');
 /** デーモンの二重 spawn 防止ロック。 */
 export const SPAWN_LOCK_PATH = path.join(KB_HOME, 'daemon.spawn.lock');
 
+/**
+ * kb が Cookie の値を最初に観測した時刻(kb session check の「セッションの古さ」表示用)。
+ * Cookie は発行時刻を持たないため、kb 自身の観測時刻で代用する。
+ * **値そのものは保存せず、変化検知のための短いハッシュだけ**を持つ。
+ */
+export const COOKIE_SEEN_PATH = path.join(KB_HOME, 'cookie-seen.json');
+
 export interface DaemonInfo {
   port: number;
   token: string;
@@ -121,6 +128,27 @@ export function readLastRun(): LastRunOptions | null {
     };
   } catch {
     return null;
+  }
+}
+
+/** Cookie 値の初観測記録(キー: "<profile>|<domain>|<name>")。 */
+export type CookieSeenStore = Record<string, { hash: string; firstSeen: string }>;
+
+export function readCookieSeen(): CookieSeenStore {
+  try {
+    const raw = JSON.parse(fs.readFileSync(COOKIE_SEEN_PATH, 'utf8')) as CookieSeenStore;
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writeCookieSeen(store: CookieSeenStore): void {
+  ensureKbHome();
+  try {
+    fs.writeFileSync(COOKIE_SEEN_PATH, JSON.stringify(store, null, 2));
+  } catch {
+    /* 診断用の付加情報なので、書けなくても致命的ではない */
   }
 }
 
