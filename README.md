@@ -10,7 +10,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3ddc97.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A518-3ddc97.svg" alt="Node >= 18">
   <img src="https://img.shields.io/badge/Playwright-Chromium-2a3244.svg" alt="Playwright + Chromium">
-  <img src="https://img.shields.io/badge/MCP-26%20tools-2a3244.svg" alt="MCP · 26 tools">
+  <img src="https://img.shields.io/badge/MCP-34%20tools-2a3244.svg" alt="MCP · 34 tools">
 </p>
 
 日本語版は [README.ja.md](README.ja.md) を参照してください。
@@ -18,7 +18,7 @@
 Everything a GUI browser gives you — page rendering, cookie management, DevTools operations (Network / Console / Elements) — is available as `kb` commands. FoxyProxy-style proxy profiles are built in, with **restart-free switching** and per-host routing rules. Designed to be driven by AI agents (Claude Code, etc.) via Bash or MCP, while the window is a real Chrome you can use by hand at any time.
 
 > **Two workflows it's built for:**
-> - **Drive it from an AI agent** — Claude Code and other agents operate kb over **MCP (26 tools)** or **Bash** (every command supports `--json`). The accessibility-snapshot + `--ref` loop is tuned for reliable, low-token automation, and the resident daemon returns each step in tens of milliseconds.
+> - **Drive it from an AI agent** — Claude Code and other agents operate kb over **MCP (34 tools)** or **Bash** (every command supports `--json`). The accessibility-snapshot + `--ref` loop is tuned for reliable, low-token automation, and the resident daemon returns each step in tens of milliseconds.
 > - **Security research & bug-bounty recon** (authorized testing only) — session-shared HTTP, live network inspection/mocking, raw `eval` on authenticated SPAs, proxy chaining into Burp/Caido, two-account IDOR via profiles, and masked, shareable evidence bundles. See [Security research & bug-bounty recon](#security-research--bug-bounty-recon).
 
 ## Features
@@ -37,7 +37,7 @@ Everything a GUI browser gives you — page rendering, cookie management, DevToo
 - **Persistent sign-in** — log in once and the state is kept in the profile across sessions; `kb login` wraps the manual sign-in flow in one command, `kb storage dump / restore` exports it to a file
 - **Operation recording** — commands, network, and console are journaled by default; `kb log export` produces a self-contained bundle (report + reproduction steps + standalone curl + screenshots) with sensitive values masked by default
 - **Human-in-the-loop** — the agent automates, you take over for logins/CAPTCHAs, `kb wait` detects when you're done
-- **MCP server** — `kb-mcp` exposes 26 tools (screenshots are returned as images)
+- **MCP server** — `kb-mcp` exposes 34 tools (screenshots are returned as images)
 - **`--json` everywhere** — machine-readable output for scripting and agents
 
 ## Install
@@ -49,6 +49,8 @@ npm link        # makes kb / kb-mcp available globally
 ```
 
 The browser binary is auto-selected: installed Chrome → Edge → Playwright's bundled Chromium (run `npx playwright install chromium` only if you need the bundled one).
+
+For every command, argument, option, default, MCP input, and environment variable, see the [complete CLI / MCP reference (Japanese)](docs/CLI_REFERENCE.ja.md).
 
 ## Quick start
 
@@ -74,7 +76,8 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 | Dialogs | `kb dialog [show]` / `kb dialog accept [text]` / `kb dialog dismiss` / `kb dialog policy [hold\|accept\|dismiss]` (hold `alert`/`confirm`/`prompt`, then respond; default `hold`) |
 | HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file] [--no-follow \| --follow-verbose]` (page-independent; shares cookies & proxy with the browser) |
 | Login | `kb login [url] [--until <glob>] [--save <file>]` (manual sign-in → state auto-saved to the profile) |
-| Cookies / session | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump/restore` |
+| Account signup | `kb signup bootstrap <name> <url> [--check-url <url>] [--expect-selector <sel>] [--expect-cookie <name>]` / `adopt <name> [--restore-proxy]` / `status [name]` / `checkpoint <name>` (sign up in ordinary Chrome, then adopt the same dedicated profile into kb) |
+| Cookies / session | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump` / `kb storage restore <file> [--replace]` / `kb session check <url> [--expect-selector <sel>]` |
 | Downloads | `kb downloads [list/clear]` (auto-saved under `~/.kb/downloads/`) |
 | Network | `kb net log [-f] [--filter re] [--responses]` / `kb net body <seq>` (response body) / `kb net headers <seq>` (full headers) / `kb net block <glob>` / `kb net mock <glob> [--body f\|--text s] [--status n]` / `kb net unroute <id>\|--all` / `kb net har start/stop` |
 | Console | `kb console [-f]` |
@@ -158,7 +161,7 @@ kb daemon start --detach-key "Ctrl+Shift+O"   # pick your own; "off" to disable
 
 ## Getting past bot checks
 
-kb presents as a **normal (non-automation) browser by default** — `navigator.webdriver` is hidden via `--disable-blink-features=AutomationControlled`, using your real Chrome/Edge when available. That clears the common "you look like a bot" checks (Cloudflare Bot Fight Mode, basic JS challenges). Disable it with `--no-stealth` if you specifically want to test bot handling.
+For normal kb operation, `navigator.webdriver` is hidden via `--disable-blink-features=AutomationControlled`, using your installed Chrome/Edge when available. That helps with common "you look like a bot" checks (Cloudflare Bot Fight Mode, basic JS challenges). Disable it with `--no-stealth` if you specifically want to test bot handling.
 
 What kb **can't** win from the client side: TLS/JA3 & HTTP-2 fingerprints, IP reputation, the CDP `Runtime.enable` leak, and interactive **Cloudflare Turnstile / Managed Challenge** CAPTCHAs. For those, solve it once by hand and let the pass cookie (`cf_clearance`) persist in the profile:
 
@@ -167,6 +170,30 @@ kb login example.com --until-gone "iframe[src*='challenges.cloudflare.com']"   #
 # or attach to a real Chrome you drive yourself:
 kb daemon start --cdp http://127.0.0.1:9222
 ```
+
+When **account creation itself is blocked** by Cloudflare or a similar service, `kb login` may be too late: the browser is already under Playwright/CDP control. Use the signup handoff flow instead:
+
+```bash
+kb daemon stop
+kb signup bootstrap target-a https://target.example/signup \
+  --check-url https://target.example/account \
+  --expect-selector "#account-menu"
+# Complete signup, Turnstile, and email/SMS verification in the ordinary Chrome window, then close it
+kb signup adopt target-a --restore-proxy
+kb signup status target-a
+```
+
+`bootstrap` directly launches an installed Chrome (or `--channel msedge`) with a dedicated `signup-<name>` profile. At this stage it uses no Playwright, CDP, remote-debugging, automation, or stealth flags. It also defaults to a **direct** connection (`--no-proxy-server`), keeping Burp/Caido MITM TLS and HTTP/2 fingerprints out of the signup step. Use `--system-proxy` when the OS proxy is required.
+
+`adopt` requires a **post-login URL** such as a dashboard/account page (record it with `bootstrap --check-url`, or pass it to adopt). It opens the same profile under kb and first runs `session check` over the direct connection. A challenge, connection failure, or redirect from the check URL to a login page is not counted as success. Add `--expect-selector` (an element visible only after login) and/or `--expect-cookie` (name only; its value is omitted from check results) as stronger optional evidence.
+
+Only a check satisfying every condition is saved as a Cookie + localStorage checkpoint at `~/.kb/signups/<name>/storage-state.json`. `kb signup checkpoint` re-runs the same checks and never overwrites a known-good checkpoint with degraded state. With `--restore-proxy`, kb restores the proxy that was active before bootstrap, checks again, and rolls back to direct plus the last known-good checkpoint—then verifies the rollback—if the proxy causes a challenge, login redirect, or connection failure.
+
+Close the ordinary Chrome window **normally** before adopting. kb rejects handoff while its daemon or any Chrome child process still holds that profile's `--user-data-dir`, avoiding concurrent use and possible profile corruption. Use `bootstrap ... --reuse-profile` only to resume an existing signup; it preserves the custom profile/channel, original proxy, success conditions, and checkpoint.
+
+Important: an expiry-less **session cookie is removed when ordinary Chrome closes**, so this handoff cannot carry it. Select “keep me signed in” when available so the site issues a persistent authentication cookie. `--expect-cookie <name>` turns loss into a failed adoption instead of a false success. For targets that never issue persistent cookies, use `kb login`, or `--cdp` when the program rules allow it.
+
+The checkpoint contains login secrets: do not share or commit it. This flow does not bypass challenges automatically; it safely hands off a registration that a human completed normally on an authorized target.
 
 ## Staying signed in
 
@@ -348,7 +375,7 @@ When a connection fails (the browser shows `ERR_TUNNEL_CONNECTION_FAILED`), `kb 
 claude mcp add kb -- kb-mcp
 ```
 
-Exposes `kb_snapshot`, `kb_open`, `kb_text`, `kb_translate` (translate the page), `kb_screenshot` (returns an image), `kb_click`, `kb_fill`, `kb_select`, `kb_eval`, `kb_dialog` (respond to alert/confirm/prompt), `kb_tabs_detach` (pop tabs into a new window), `kb_request`, `kb_net_log`, `kb_net_body`, `kb_net_headers`, `kb_proxy_use`, and more — 26 tools.
+Exposes `kb_snapshot`, `kb_open`, `kb_text`, `kb_translate` (translate the page), `kb_screenshot` (returns an image), `kb_click`, `kb_fill`, `kb_select`, `kb_eval`, `kb_dialog` (respond to alert/confirm/prompt), `kb_tabs_detach` (pop tabs into a new window), `kb_request`, `kb_net_log`, `kb_net_body`, `kb_net_headers`, `kb_proxy_use`, and more — 34 tools.
 
 **Via Bash** everything is available too (every command supports `--json`, with symmetric `{ok:true,result}` / `{ok:false,error}`). The recommended loop:
 
@@ -391,7 +418,7 @@ kb (CLI) ──HTTP+token──▶ daemon ── Playwright persistent context �
 kb-mcp (MCP stdio) ──┘      └─ local relay proxy (token auth) ──▶ upstream proxies (profiles/rules)
 ```
 
-State lives in `~/.kb/` (daemon.json / proxies.json / profiles/ / downloads/ / daemon.log).
+State lives in `~/.kb/` (daemon.json / proxies.json / profiles/ / signups/ / downloads/ / daemon.log).
 
 ## Development
 

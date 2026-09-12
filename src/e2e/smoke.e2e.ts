@@ -117,6 +117,18 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
           // bot 対策のチャレンジページを模したもの
           res.writeHead(403, { 'Content-Type': 'text/html' });
           res.end('<html><head><title>Just a moment...</title></head><body>Verifying you are human</body></html>');
+        } else if (req.url === '/account-redirect') {
+          res.writeHead(302, { Location: '/login' });
+          res.end();
+        } else if (req.url === '/login') {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end('<html><head><title>Sign in</title></head><body>login required</body></html>');
+        } else if (req.url === '/storage.html') {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end('<html><head><title>Storage</title></head><body>storage</body></html>');
+        } else if (req.url === '/account-marker') {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end('<html><head><title>Account</title></head><body><nav id="account-menu">signed in</nav></body></html>');
         } else {
           res.writeHead(404);
           res.end('not found');
@@ -310,6 +322,35 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
     assert.ok(names.includes('e2e2'), `e2e2 が cookie に載るはず: ${names.join(',')}`);
   });
 
+  test('storage.restore replace: Cookie と localStorage を checkpoint に正確に置換する', async () => {
+    await rpc('open', { url: `${origin}/storage.html` });
+    await rpc('eval', { expression: `localStorage.setItem('keep', 'old'); localStorage.setItem('rogue', 'remove-me'); 'ok'` });
+    const result = await rpc('storage.restore', {
+      replace: true,
+      state: {
+        cookies: [
+          {
+            name: 'restore_marker',
+            value: 'kept',
+            domain: '127.0.0.1',
+            path: '/',
+            expires: -1,
+            httpOnly: false,
+            secure: false,
+            sameSite: 'Lax',
+          },
+        ],
+        origins: [{ origin, localStorage: [{ name: 'keep', value: 'new' }] }],
+      },
+    });
+    assert.ok(result.clearedOrigins >= 1);
+    const values = await rpc('eval', { expression: `({ keep: localStorage.getItem('keep'), rogue: localStorage.getItem('rogue') })` });
+    assert.deepEqual(values.result, { keep: 'new', rogue: null });
+    const cookies = await rpc('cookies.list', {});
+    assert.equal(cookies.some((cookie: { name: string }) => cookie.name === 'e2e1' || cookie.name === 'e2e2'), false);
+    assert.equal(cookies.some((cookie: { name: string; value: string }) => cookie.name === 'restore_marker' && cookie.value === 'kept'), true);
+  });
+
   test('net.export: 捕捉済みログから HAR を合成する(kb request も含む)', { timeout: 30_000 }, async () => {
     // ページの fetch(/api/data)と kb request(POST /api/data)の両方が HAR に載ること
     await rpc('request', { url: `${origin}/api/data`, method: 'POST', data: '{"har":1}' });
@@ -395,6 +436,32 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
     assert.equal(target.challenged, true);
     assert.equal(target.vendor, 'cloudflare');
     assert.match(r.hint, /証拠/);
+  });
+
+  test('session.check: ログイン画面へ戻された最終 URL を返す', { timeout: 60_000 }, async () => {
+    const r = await rpc('session.check', { url: `${origin}/account-redirect` });
+    const target = r.probes.find((p: any) => p.label === 'target');
+    assert.equal(target.status, 200);
+    assert.equal(target.finalUrl, `${origin}/login`);
+  });
+
+  test('session.check: ログイン済み画面の期待 selector を実タブで確認する', { timeout: 60_000 }, async () => {
+    const matched = await rpc('session.check', {
+      url: `${origin}/account-marker`,
+      expectSelector: '#account-menu',
+      timeoutMs: 1_000,
+    });
+    assert.equal(matched.probes.find((p: any) => p.label === 'target').selectorMatched, true);
+
+    const missing = await rpc('session.check', {
+      url: `${origin}/account-marker`,
+      expectSelector: '#missing-account-menu',
+      timeoutMs: 250,
+    });
+    const target = missing.probes.find((p: any) => p.label === 'target');
+    assert.equal(target.selectorMatched, false);
+    assert.match(target.selectorError, /Timeout|waiting for locator/i);
+    assert.equal(missing.verdict, 'expectation-failed');
   });
 
   test('journal: command イベントは RPC 直後にディスクへ flush される', { timeout: 30_000 }, async () => {

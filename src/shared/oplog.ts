@@ -454,7 +454,7 @@ export function toCliString(e: CommandEvent): string {
     case 'cookies.clear':
       return 'kb cookies clear';
     case 'storage.restore':
-      return 'kb storage restore <file>';
+      return `kb storage restore <file>${a.replace ? ' --replace' : ''}`;
     case 'ws.connect':
       return `kb ws connect ${q(a.url)}${a.tab != null ? ` -t ${a.tab}` : ''}`;
     case 'ws.send':
@@ -462,7 +462,7 @@ export function toCliString(e: CommandEvent): string {
     case 'ws.close':
       return `kb ws close ${a.id}`;
     case 'session.check':
-      return `kb session check ${q(a.url)}${a.api ? ` --api ${q(a.api)}` : ''}`;
+      return `kb session check ${q(a.url)}${a.api ? ` --api ${q(a.api)}` : ''}${a.expectSelector ? ` --expect-selector ${q(a.expectSelector)}` : ''}`;
     case 'net.block':
       return `kb net block ${q(a.pattern)}`;
     case 'net.mock':

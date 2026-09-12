@@ -23,6 +23,12 @@ const SEEN_MAX = 1_000;
 export interface SessionProbe {
   label: 'root' | 'target' | 'api';
   url: string;
+  /** リダイレクト後に実際に表示された URL。ログイン画面へ戻された等の判定材料。 */
+  finalUrl?: string;
+  /** 呼び出し側が指定した「ログイン済みページにだけある要素」の可視性。target probe のみ。 */
+  expectSelector?: string;
+  selectorMatched?: boolean;
+  selectorError?: string;
   /** navigate = 実タブのナビゲーション / fetch = ページ内 fetch(アプリと同じ経路)。 */
   via: 'navigate' | 'fetch';
   status?: number;
@@ -104,7 +110,13 @@ export function mergeCookieSeen(
 }
 
 /** 実タブでナビゲートして status とチャレンジ有無を測る。 */
-async function navigateProbe(page: Page, label: SessionProbe['label'], url: string, timeout: number): Promise<SessionProbe> {
+async function navigateProbe(
+  page: Page,
+  label: SessionProbe['label'],
+  url: string,
+  timeout: number,
+  expectSelector?: string,
+): Promise<SessionProbe> {
   const started = Date.now();
   // チャレンジが自動通過するとページは別ドキュメントへ遷移するため、
   // goto の戻り値ではなく「最後に見たメインフレームの document レスポンス」を採用する。
@@ -151,9 +163,21 @@ async function navigateProbe(page: Page, label: SessionProbe['label'], url: stri
         }
       }
     }
+    let selectorMatched: boolean | undefined;
+    let selectorError: string | undefined;
+    if (expectSelector) {
+      try {
+        await page.locator(expectSelector).first().waitFor({ state: 'visible', timeout });
+        selectorMatched = true;
+      } catch (e) {
+        selectorMatched = false;
+        selectorError = errMsg(e);
+      }
+    }
     return {
       label,
       url,
+      finalUrl: page.url(),
       via: 'navigate',
       status: doc.last?.status,
       challenged: sig.challenged,
@@ -161,6 +185,7 @@ async function navigateProbe(page: Page, label: SessionProbe['label'], url: stri
       marker: sig.marker,
       title,
       ms: Date.now() - started,
+      ...(expectSelector ? { expectSelector, selectorMatched, ...(selectorError ? { selectorError } : {}) } : {}),
       ...(settledAfterMs != null ? { settledAfterMs } : {}),
     };
   } catch (e) {
@@ -221,7 +246,7 @@ async function fetchProbe(page: Page, url: string, timeout: number): Promise<Ses
  */
 export async function checkSession(
   context: BrowserContext,
-  opts: { url: string; apiUrl?: string; timeoutMs: number; profile: string },
+  opts: { url: string; apiUrl?: string; expectSelector?: string; timeoutMs: number; profile: string },
 ): Promise<SessionCheckResult> {
   const target = new URL(opts.url);
   const rootUrl = `${target.origin}/`;
@@ -229,7 +254,7 @@ export async function checkSession(
   const probes: SessionProbe[] = [];
   try {
     probes.push(await navigateProbe(page, 'root', rootUrl, opts.timeoutMs));
-    probes.push(await navigateProbe(page, 'target', opts.url, opts.timeoutMs));
+    probes.push(await navigateProbe(page, 'target', opts.url, opts.timeoutMs, opts.expectSelector));
     if (opts.apiUrl) {
       const sameOrigin = (() => {
         try {
@@ -262,6 +287,11 @@ export async function checkSession(
     }));
 
   const outcomes: ProbeOutcome[] = probes.map((p) => ({ label: p.label, status: p.status, challenged: p.challenged, error: p.error }));
-  const { verdict, hint } = judgeSession(outcomes, { hasCookies: jar.length > 0 });
+  let { verdict, hint } = judgeSession(outcomes, { hasCookies: jar.length > 0 });
+  const targetProbe = probes.find((probe) => probe.label === 'target');
+  if (opts.expectSelector && verdict === 'ok' && targetProbe?.selectorMatched !== true) {
+    verdict = 'expectation-failed';
+    hint = `対象の HTTP 応答は正常ですが、期待したログイン済み要素 (${opts.expectSelector}) が visible ではありません。ログイン画面・権限不足・SPA の描画失敗を確認してください。`;
+  }
   return { host: target.hostname, probes, cookies, cookieCount: jar.length, verdict, hint };
 }

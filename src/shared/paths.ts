@@ -11,6 +11,12 @@ export const DAEMON_INFO_PATH = path.join(KB_HOME, 'daemon.json');
 /** ブラウザプロファイル(user-data-dir)の置き場。 */
 export const PROFILES_DIR = path.join(KB_HOME, 'profiles');
 
+/**
+ * Cloudflare 等を通常 Chrome で人が通過してから kb へ引き継ぐ signup bootstrap の状態。
+ * 状態 JSON と storageState checkpoint を signup 名ごとのディレクトリに置く。
+ */
+export const SIGNUPS_DIR = path.join(KB_HOME, 'signups');
+
 /** ダウンロードファイルの保存先。 */
 export const DOWNLOADS_DIR = path.join(KB_HOME, 'downloads');
 
@@ -66,6 +72,7 @@ export function ensureKbHome(): void {
   fs.mkdirSync(KB_HOME, { recursive: true });
   fs.mkdirSync(PROFILES_DIR, { recursive: true });
   fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+  fs.mkdirSync(SIGNUPS_DIR, { recursive: true });
 }
 
 /**

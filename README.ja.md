@@ -10,7 +10,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3ddc97.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A518-3ddc97.svg" alt="Node >= 18">
   <img src="https://img.shields.io/badge/Playwright-Chromium-2a3244.svg" alt="Playwright + Chromium">
-  <img src="https://img.shields.io/badge/MCP-26%20tools-2a3244.svg" alt="MCP · 26 tools">
+  <img src="https://img.shields.io/badge/MCP-34%20tools-2a3244.svg" alt="MCP · 34 tools">
 </p>
 
 English version: [README.md](README.md)
@@ -18,7 +18,7 @@ English version: [README.md](README.md)
 GUI ブラウザが持つ機能 — ページのレンダリング、Cookie 管理、DevTools 操作(Network / Console / Elements)— を `kb` コマンドで扱えます。FoxyProxy 風のプロキシプロファイル管理(**ブラウザ無再起動の即時切替**、ホスト別振り分けルール)を内蔵。Claude Code などの AI エージェントから Bash / MCP 経由で操作することを想定しつつ、ウィンドウは本物の Chrome なので人間の手動操作といつでも併用できます。
 
 > **想定している 2 つの使い方:**
-> - **AI エージェントから操作** — Claude Code などのエージェントが **MCP(24 ツール)** または **Bash**(全コマンド `--json` 対応)で kb を駆動。アクセシビリティ snapshot + `--ref` のループは低トークンで確実な自動操作に最適化され、常駐デーモンにより各操作は数十 ms で返る。
+> - **AI エージェントから操作** — Claude Code などのエージェントが **MCP(34 ツール)** または **Bash**(全コマンド `--json` 対応)で kb を駆動。アクセシビリティ snapshot + `--ref` のループは低トークンで確実な自動操作に最適化され、常駐デーモンにより各操作は数十 ms で返る。
 > - **セキュリティ調査・バグバウンティの recon**(認可されたテスト限定)— セッション共有 HTTP、ネットワークのライブ監視/改変、認証済み SPA での生 `eval`、Burp/Caido への proxy チェーン、プロファイルによる 2 アカウント IDOR、機微値マスク済みの共有可能な証跡バンドル。詳細は [セキュリティ調査・バグバウンティの recon](#セキュリティ調査バグバウンティの-recon) を参照。
 
 ## 特徴
@@ -37,7 +37,7 @@ GUI ブラウザが持つ機能 — ページのレンダリング、Cookie 管�
 - **ログイン状態の永続化** — 一度サインインすればプロファイルに自動保存され、次回以降も維持。`kb login` で手動サインインの流れをコマンド一つに。`kb storage dump / restore` でファイルへの持ち出しも可
 - **操作記録** — 実行した操作・通信・コンソールを既定で常時記録。`kb log export` で「レポート + 再現手順 + curl 単体再実行 + スクショ」の自己完結バンドルを生成(機微な値は既定でマスク)
 - **人間との協調** — 自動操作中でもログインや CAPTCHA はユーザーがウィンドウで直接操作し、`kb wait` で完了を検知して再開
-- **MCP サーバ** — `kb-mcp` が 24 ツールを公開(スクリーンショットは画像で返る)
+- **MCP サーバ** — `kb-mcp` が 34 ツールを公開(スクリーンショットは画像で返る)
 - **全コマンド `--json`** — スクリプト・エージェント向けの機械可読出力
 
 ## インストール
@@ -49,6 +49,8 @@ npm link        # kb / kb-mcp をグローバルに
 ```
 
 ブラウザ実体はインストール済みの Chrome → Edge → Playwright 同梱 Chromium の順で自動選択されます(同梱版を使う場合のみ `npx playwright install chromium`)。
+
+全コマンド、引数、オプション、既定値、MCP の入力、環境変数については [CLI / MCP 完全リファレンス](docs/CLI_REFERENCE.ja.md) を参照してください。
 
 ## クイックスタート
 
@@ -74,7 +76,8 @@ kb daemon stop             # ブラウザごと終了
 | ダイアログ | `kb dialog [show]` / `kb dialog accept [text]` / `kb dialog dismiss` / `kb dialog policy [hold\|accept\|dismiss]`(`alert`/`confirm`/`prompt` を保留してから応答。既定 `hold`) |
 | HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file] [--no-follow \| --follow-verbose]`(ページ非依存。Cookie・プロキシはブラウザと共有) |
 | ログイン | `kb login [url] [--until <glob>] [--save <file>]`(手動サインイン → 状態はプロファイルに自動保存) |
-| Cookie / セッション | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump/restore` |
+| アカウント作成 | `kb signup bootstrap <name> <url> [--check-url <url>] [--expect-selector <sel>] [--expect-cookie <name>]` / `adopt <name> [--restore-proxy]` / `status [name]` / `checkpoint <name>`(通常 Chrome で登録後、同じ専用 profile を kb へ引き継ぐ) |
+| Cookie / セッション | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump` / `kb storage restore <file> [--replace]` / `kb session check <url> [--expect-selector <sel>]` |
 | ダウンロード | `kb downloads [list/clear]`(`~/.kb/downloads/` に自動保存) |
 | Network | `kb net log [-f] [--filter re] [--responses]` / `kb net body <seq>`(レスポンス本文)/ `kb net headers <seq>`(全ヘッダ)/ `kb net block <glob>` / `kb net mock <glob> [--body f\|--text s] [--status n]` / `kb net unroute <id>\|--all` / `kb net har start/stop` |
 | Console | `kb console [-f]` |
@@ -158,7 +161,7 @@ kb daemon start --detach-key "Ctrl+Shift+O"   # 好きなコンボに。"off" �
 
 ## ボットチェックを通す
 
-kb は既定で **通常(非自動化)ブラウザとして振る舞います** — `--disable-blink-features=AutomationControlled` で `navigator.webdriver` を隠し、実 Chrome/Edge があればそれを使います。これで「ボットに見える」よくあるチェック(Cloudflare Bot Fight Mode・軽い JS チャレンジ)は通りやすくなります。ボット挙動そのものを試したいときは `--no-stealth`。
+通常の kb 操作では `--disable-blink-features=AutomationControlled` で `navigator.webdriver` を隠し、実 Chrome/Edge があればそれを使います。これで「ボットに見える」よくあるチェック(Cloudflare Bot Fight Mode・軽い JS チャレンジ)は通りやすくなります。ボット挙動そのものを試したいときは `--no-stealth`。
 
 client 側で **潰せない**もの: TLS/JA3・HTTP-2 フィンガープリント、IP レピュテーション、CDP の `Runtime.enable` リーク、そして対話型の **Cloudflare Turnstile / Managed Challenge**。これらは 1 回だけ人手で解いて通過 Cookie(`cf_clearance`)をプロファイルに永続化するのが確実です:
 
@@ -167,6 +170,30 @@ kb login example.com --until-gone "iframe[src*='challenges.cloudflare.com']"   #
 # または自分で起動した実 Chrome にアタッチ:
 kb daemon start --cdp http://127.0.0.1:9222
 ```
+
+ただし、**アカウント作成そのものが Cloudflare 等に阻まれる対象**では、`kb login` を始めた時点ですでに Playwright/CDP 配下です。この場合は signup 引き継ぎフローを使います:
+
+```bash
+kb daemon stop
+kb signup bootstrap target-a https://target.example/signup \
+  --check-url https://target.example/account \
+  --expect-selector "#account-menu"
+# 開いた通常 Chrome で登録・Turnstile・メール/SMS確認を完了し、ウィンドウを閉じる
+kb signup adopt target-a --restore-proxy
+kb signup status target-a
+```
+
+`bootstrap` はインストール済み Chrome(または `--channel msedge`)を、専用 profile `signup-<name>` で直接起動します。この段階では Playwright / CDP / remote debugging / automation / stealth 用フラグを一切使いません。接続も既定は **direct**(`--no-proxy-server`)なので、Burp/Caido の MITM による TLS/HTTP-2 指紋変化を登録時だけ避けられます。OS の proxy が必要なら `--system-proxy` を指定します。
+
+`adopt` には dashboard/account 等の **ログイン後 URL** が必須です(`bootstrap --check-url` で記録するか、adopt 時に指定)。同じ profile を kb で開き、まず direct のまま `session check` を実行します。チャレンジ、到達不能、check URL からログイン画面へのリダイレクトは成功扱いにしません。さらに `--expect-selector`(ログイン後だけ見える要素)と `--expect-cookie`(名前だけ。判定結果には値を出さない)を任意の成功条件として加えられます。
+
+すべての条件に成功したときだけ Cookie + localStorage の checkpoint を `~/.kb/signups/<name>/storage-state.json` に保存します。`kb signup checkpoint` も毎回同じ条件を再診断し、劣化時は既存の正常 checkpoint を上書きしません。`--restore-proxy` を付けると登録前の kb proxy に戻して再診断し、再チャレンジ・ログイン退避・到達不能が起きた場合は direct + 直前の正常 checkpoint へ自動 rollback して再確認します。
+
+通常 Chrome は adopt 前に必ず**ウィンドウから正常終了**してください。同じ profile を同時に開くと破損し得るため、kb デーモン稼働中や、その profile の `--user-data-dir` を保持する Chrome 子プロセスが残っている間は引き継ぎを拒否します。途中から再開する場合だけ `bootstrap ... --reuse-profile` を使います(カスタム profile/channel・元 proxy・成功条件・checkpoint は保持)。
+
+重要: 有効期限のない **session Cookie は通常 Chrome の正常終了で消える**ため、この方式では引き継げません。可能なら登録時に「ログイン状態を保持する」を選び、期限付き認証 Cookie を発行させてください。`--expect-cookie <名前>` を付ければ、消失を成功扱いせず検出できます。期限付き Cookie が発行されない対象では `kb login` または、対象のルール上許可される場合に `--cdp` を使います。
+
+checkpoint にはログイン秘密情報が含まれるため、共有・コミットしないでください。また、この機能はチャレンジを自動突破するものではなく、許可された対象で人が正規に完了した登録状態を安全に引き継ぐためのものです。
 
 ## ログイン状態の維持
 
@@ -348,7 +375,7 @@ kb proxy off           # 直結に戻す(これも無再起動)
 claude mcp add kb -- kb-mcp
 ```
 
-`kb_snapshot` `kb_open` `kb_text` `kb_translate`(ページ翻訳)`kb_screenshot`(画像で返る)`kb_click` `kb_fill` `kb_select` `kb_eval` `kb_dialog`(alert/confirm/prompt への応答)`kb_tabs_detach`(タブを別ウィンドウへ)`kb_request` `kb_net_log` `kb_net_body` `kb_net_headers` `kb_proxy_use` など 26 ツールを公開。
+`kb_snapshot` `kb_open` `kb_text` `kb_translate`(ページ翻訳)`kb_screenshot`(画像で返る)`kb_click` `kb_fill` `kb_select` `kb_eval` `kb_dialog`(alert/confirm/prompt への応答)`kb_tabs_detach`(タブを別ウィンドウへ)`kb_request` `kb_net_log` `kb_net_body` `kb_net_headers` `kb_proxy_use` など 34 ツールを公開。
 
 **Bash 経由**でも全機能を使えます(全コマンド `--json` 対応、成功 `{ok:true,result}` / 失敗 `{ok:false,error}` の対称形)。推奨ループ:
 

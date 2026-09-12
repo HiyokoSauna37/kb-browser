@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findOwnedDaemons, type ProcInfo } from './procscan';
+import { findOwnedDaemons, findProfileBrowserProcess, findProfileProcesses, type ProcInfo } from './procscan';
 
 // テストは win32(norm が lowercase)/ posix(norm が identity)双方で通るよう、
 // profilesDir と cmd 内の user-data-dir を同一表記(小文字・forward slash)で書く。
@@ -113,4 +113,63 @@ test('findOwnedDaemons: マーカー付き孤児と旧式(子から辿る)デー
     { pid: 301, ppid: 300, cmd: 'chrome --user-data-dir=/home/u/.kb/profiles/p1' },
   ];
   assert.deepEqual(findOwnedDaemons(procs, PROFILES, 999, HOME).sort(), [300, 400]);
+});
+
+test('findProfileProcesses: 親 PID が消えても同じ user-data-dir を持つ子を検出する', () => {
+  const profile = '/home/u/.kb/profiles/signup-target';
+  const procs: ProcInfo[] = [
+    { pid: 701, ppid: 1, cmd: `chrome --user-data-dir="${profile}" --new-window` },
+    { pid: 702, ppid: 701, cmd: `chrome --type=gpu-process --user-data-dir=${profile}` },
+    { pid: 703, ppid: 1, cmd: 'chrome --user-data-dir=/other/profile' },
+  ];
+  assert.deepEqual(findProfileProcesses(procs, profile, 999), [701, 702]);
+});
+
+test('findProfileProcesses: 前方一致する別 profile と selfPid は含めない', () => {
+  const profile = '/home/u/.kb/profiles/p1';
+  const procs: ProcInfo[] = [
+    { pid: 801, ppid: 1, cmd: `chrome --user-data-dir=${profile}-other` },
+    { pid: 802, ppid: 1, cmd: `chrome --user-data-dir=${profile}` },
+  ];
+  assert.deepEqual(findProfileProcesses(procs, profile, 802), []);
+});
+
+test('findProfileBrowserProcess: --type を持たない main process を優先する', () => {
+  const profile = '/home/u/.kb/profiles/p1';
+  const procs: ProcInfo[] = [
+    { pid: 901, ppid: 902, cmd: `chrome --type=renderer --user-data-dir=${profile}` },
+    { pid: 902, ppid: 1, cmd: `chrome --user-data-dir="${profile}" --new-window` },
+    { pid: 903, ppid: 902, cmd: `chrome --type=gpu-process --user-data-dir=${profile}` },
+  ];
+  assert.equal(findProfileBrowserProcess(procs, profile, 999), 902);
+});
+
+test('findProfileProcesses: 空白を含む user-data-dir の Windows/標準 quote 表記を検出する', () => {
+  const profile = 'C:\\Users\\test user\\.kb\\profiles\\signup-target';
+  const procs: ProcInfo[] = [
+    { pid: 201, ppid: 1, cmd: 'chrome.exe "--user-data-dir=C:\\Users\\test user\\.kb\\profiles\\signup-target"' },
+    { pid: 202, ppid: 201, cmd: 'chrome.exe --user-data-dir="C:\\Users\\test user\\.kb\\profiles\\signup-target" --type=renderer' },
+    { pid: 203, ppid: 201, cmd: 'chrome.exe --user-data-dir "C:\\Users\\test user\\.kb\\profiles\\signup-target" --type=gpu-process' },
+    { pid: 204, ppid: 1, cmd: 'chrome.exe "--user-data-dir=C:\\Users\\test user\\.kb\\profiles\\other"' },
+  ];
+  assert.deepEqual(findProfileProcesses(procs, profile, 999), [201, 202, 203]);
+});
+
+test('findProfileProcesses: ps が引用符を落とした空白入り user-data-dir を次の flag まで読む', () => {
+  const profile = '/tmp/kb signup/profiles/signup-target';
+  const procs: ProcInfo[] = [
+    { pid: 301, ppid: 1, cmd: `chrome --user-data-dir=${profile} --no-first-run --new-window https://example.com` },
+    { pid: 302, ppid: 301, cmd: `chrome --type=renderer --user-data-dir=${profile} --lang=ja` },
+    { pid: 303, ppid: 1, cmd: 'chrome --user-data-dir=/tmp/kb signup/profiles/other --no-first-run' },
+  ];
+  assert.deepEqual(findProfileProcesses(procs, profile, 999), [301, 302]);
+});
+
+test('findProfileBrowserProcess: quote された --type を持つ子を main process と誤認しない', () => {
+  const profile = 'C:\\Users\\test user\\.kb\\profiles\\signup-target';
+  const procs: ProcInfo[] = [
+    { pid: 401, ppid: 402, cmd: `chrome.exe "--type=renderer" "--user-data-dir=${profile}"` },
+    { pid: 402, ppid: 1, cmd: `chrome.exe "--user-data-dir=${profile}" --new-window` },
+  ];
+  assert.equal(findProfileBrowserProcess(procs, profile, 999), 402);
 });

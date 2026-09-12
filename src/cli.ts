@@ -10,6 +10,7 @@ import { registerLogCommands } from './cli/commands/log';
 import { registerEnvCommands } from './cli/commands/env';
 import { registerNetCommands } from './cli/commands/net';
 import { registerProxyCommands } from './cli/commands/proxy';
+import { registerSignupCommands } from './cli/commands/signup';
 
 /**
  * kb CLI のエントリポイント。コマンド定義はグループ別に src/cli/commands/ にあり、
@@ -30,6 +31,7 @@ program
 registerDaemonCommands(program);   // daemon start / stop / status
 registerBrowseCommands(program);   // open / tabs / screenshot / text / html / snapshot / eval / request
 registerActionCommands(program);   // click / fill / … / scroll / back / forward / reload / pdf
+registerSignupCommands(program);   // signup bootstrap / adopt / status / checkpoint
 registerStateCommands(program);    // downloads / cookies / storage
 registerLogCommands(program);      // log (操作記録)
 registerEnvCommands(program);      // profile / mode / wait / login / auth / emulate

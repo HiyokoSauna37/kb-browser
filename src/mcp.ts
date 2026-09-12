@@ -304,10 +304,11 @@ tool(
   {
     url: z.string().describe('診断対象の URL'),
     api: z.string().optional().describe('対照に使う API の URL(省略時は観測済みの同ホスト xhr/fetch を自動選択)'),
+    expectSelector: z.string().optional().describe('ログイン済みページにだけある visible 要素の Playwright selector'),
     timeoutSec: z.number().optional().describe('各プローブのタイムアウト秒(既定 15)'),
   },
-  safe(async ({ url, api, timeoutSec }) =>
-    text(await rpc('session.check', { url, api, timeoutMs: (timeoutSec ?? 15) * 1000 })),
+  safe(async ({ url, api, expectSelector, timeoutSec }) =>
+    text(await rpc('session.check', { url, api, expectSelector, timeoutMs: (timeoutSec ?? 15) * 1000 })),
   ),
 );
 

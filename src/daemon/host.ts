@@ -876,30 +876,48 @@ export class BrowserHost {
    * storageState 形式のダンプを復元する。Cookie は一括、localStorage は
    * オリジンごとに一時ページを開いて書き込む(失敗したオリジンはスキップ)。
    */
-  async storageRestore(state: {
-    cookies?: unknown[];
-    origins?: { origin: string; localStorage?: { name: string; value: string }[] }[];
-  }): Promise<{ cookies: number; origins: number; skippedOrigins: string[] }> {
-    if (state.cookies?.length) {
-      await this.context.addCookies(state.cookies as Parameters<BrowserContext['addCookies']>[0]);
-    }
+  async storageRestore(
+    state: {
+      cookies?: unknown[];
+      origins?: { origin: string; localStorage?: { name: string; value: string }[] }[];
+    },
+    replace = false,
+  ): Promise<{ cookies: number; origins: number; clearedOrigins: number; skippedOrigins: string[] }> {
+    const currentState = replace ? await this.context.storageState() : undefined;
+    const applyCookies = async () => {
+      if (replace) await this.context.clearCookies();
+      if (state.cookies?.length) {
+        await this.context.addCookies(state.cookies as Parameters<BrowserContext['addCookies']>[0]);
+      }
+    };
+    await applyCookies();
     let restored = 0;
+    let cleared = 0;
     const skipped: string[] = [];
-    for (const origin of state.origins ?? []) {
+    const desired = new Map((state.origins ?? []).map((origin) => [origin.origin, origin]));
+    const originNames = replace
+      ? [...new Set([...(currentState?.origins ?? []).map((origin) => origin.origin), ...desired.keys()])]
+      : [...desired.keys()];
+    for (const originName of originNames) {
+      const origin = desired.get(originName);
       const page = await this.context.newPage();
       try {
-        await page.goto(origin.origin, { waitUntil: 'domcontentloaded', timeout: 15_000 });
-        await page.evaluate((items) => {
+        await page.goto(originName, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+        await page.evaluate(([items, shouldClear]) => {
+          if (shouldClear) localStorage.clear();
           for (const { name, value } of items) localStorage.setItem(name, value);
-        }, origin.localStorage ?? []);
-        restored++;
+        }, [origin?.localStorage ?? [], replace] as [{ name: string; value: string }[], boolean]);
+        if (replace) cleared++;
+        if (origin) restored++;
       } catch {
-        skipped.push(origin.origin);
+        skipped.push(originName);
       } finally {
         await page.close().catch(() => {});
       }
     }
-    return { cookies: state.cookies?.length ?? 0, origins: restored, skippedOrigins: skipped };
+    // origin への一時 navigation が Set-Cookie しても、replace の最終結果は checkpoint と一致させる。
+    if (replace) await applyCookies();
+    return { cookies: state.cookies?.length ?? 0, origins: restored, clearedOrigins: cleared, skippedOrigins: skipped };
   }
 
   // ---- ネットワーク監視・改変 (NetMonitor へ委譲) ----
@@ -1010,7 +1028,7 @@ export class BrowserHost {
    * 「403 が返るのはこのパスが保護されているからか、それとも自分のセッションが切れただけか」を
    * 対照付きで判定する。プローブは使い捨てタブから撃つ(ユーザーのタブ ID は動かない)。
    */
-  async sessionCheck(opts: { url: string; api?: string; timeoutMs?: number }): Promise<
+  async sessionCheck(opts: { url: string; api?: string; expectSelector?: string; timeoutMs?: number }): Promise<
     SessionCheckResult & {
       apiAuto: boolean;
       client: { profile: string; headless: boolean; channel: string; stealth: boolean; attached: boolean; userAgent?: string };
@@ -1028,6 +1046,7 @@ export class BrowserHost {
     const result = await checkSession(this.context, {
       url,
       apiUrl,
+      expectSelector: opts.expectSelector,
       timeoutMs: opts.timeoutMs ?? 15_000,
       profile: this.profile,
     });

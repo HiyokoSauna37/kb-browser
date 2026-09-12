@@ -161,10 +161,11 @@ export function registerStateCommands(program: Command): void {
     .command('check <url>')
     .description('その URL の応答が「対象パスの性質」か「自分のセッション劣化」かを、トップページとの対照で判定する')
     .option('--api <url>', '対照に使う API の URL(省略時はこのセッションで観測した同ホストの xhr/fetch を自動選択)')
+    .option('--expect-selector <sel>', 'ログイン済みページにだけある要素が visible かも確認する')
     .option('--timeout <sec>', '各プローブのタイムアウト秒', intOpt, 15)
     .action(
-      run(async (url: string, opts: { api?: string; timeout: number }) => {
-        const r = await rpc('session.check', { url, api: opts.api, timeoutMs: opts.timeout * 1000 });
+      run(async (url: string, opts: { api?: string; expectSelector?: string; timeout: number }) => {
+        const r = await rpc('session.check', { url, api: opts.api, expectSelector: opts.expectSelector, timeoutMs: opts.timeout * 1000 });
         print(r, (x) => {
           const c = x.client;
           const lines = [
@@ -175,7 +176,9 @@ export function registerStateCommands(program: Command): void {
             const challenge = p.challenged ? `  ⚠ challenge [${p.vendor}: ${p.marker}]` : '';
             const settled = p.settledAfterMs != null ? `  (チャレンジは ${p.settledAfterMs}ms で自動通過)` : '';
             const auto = p.label === 'api' && x.apiAuto ? '  ← 自動選択' : '';
-            lines.push(`  ${p.label.padEnd(7)} ${String(status).padEnd(4)} ${p.via.padEnd(8)} ${p.url}${challenge}${settled}${auto}`);
+            const redirected = p.finalUrl && p.finalUrl !== p.url ? `  → ${p.finalUrl}` : '';
+            const selector = p.expectSelector ? `  selector=${p.selectorMatched ? 'matched' : 'MISSING'} (${p.expectSelector})` : '';
+            lines.push(`  ${p.label.padEnd(7)} ${String(status).padEnd(4)} ${p.via.padEnd(8)} ${p.url}${redirected}${challenge}${settled}${selector}${auto}`);
           }
           const cookies = x.cookies.length
             ? x.cookies
@@ -213,12 +216,13 @@ export function registerStateCommands(program: Command): void {
   storage
     .command('restore <file>')
     .description('storageState 形式のファイルからセッション状態を復元する')
+    .option('--replace', '既存 Cookie/localStorage を消してファイルの状態へ正確に置換する')
     .action(
-      run(async (file: string) => {
+      run(async (file: string, opts: { replace?: boolean }) => {
         const state = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
-        const result = await rpc('storage.restore', { state });
+        const result = await rpc('storage.restore', { state, replace: opts.replace });
         print(result, (r) => {
-          let out = `復元しました (cookies=${r.cookies}, origins=${r.origins})`;
+          let out = `${opts.replace ? '置換' : '復元'}しました (cookies=${r.cookies}, origins=${r.origins}${opts.replace ? `, cleared-origins=${r.clearedOrigins}` : ''})`;
           if (r.skippedOrigins?.length) out += `\nスキップ: ${r.skippedOrigins.join(', ')}`;
           return out;
         });

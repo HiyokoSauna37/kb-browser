@@ -192,14 +192,20 @@ test('toCliString: net.unroute --all が正しく整形される', () => {
 });
 
 test('summarizeArgs: storage.restore の state は件数に置き換わる', () => {
-  const out = summarizeArgs('storage.restore', { state: { cookies: [1, 2], origins: [] } });
+  const out = summarizeArgs('storage.restore', { state: { cookies: [1, 2], origins: [] }, replace: true });
   assert.deepEqual(out.state, { cookies: 2, origins: 0 });
+  assert.equal(out.replace, true);
 });
 
 test('toCliString: 主要コマンドが再現可能な形になる', () => {
   assert.equal(toCliString(cmdEvent('open', { url: 'https://example.com', waitUntil: 'networkidle' })), "kb open https://example.com --wait idle");
   assert.equal(toCliString(cmdEvent('click', { ref: 'e12' })), 'kb click --ref e12');
   assert.equal(toCliString(cmdEvent('fill', { selector: '#q', value: 'hello world' })), "kb fill #q 'hello world'");
+  assert.equal(toCliString(cmdEvent('storage.restore', { replace: true })), 'kb storage restore <file> --replace');
+  assert.equal(
+    toCliString(cmdEvent('session.check', { url: 'https://a/account', expectSelector: '#account menu' })),
+    "kb session check https://a/account --expect-selector '#account menu'",
+  );
   assert.equal(toCliString(cmdEvent('request', { url: 'https://a/b', method: 'POST', data: '{"a":1}' })), `kb request https://a/b -X POST -d '{"a":1}'`);
 });
 

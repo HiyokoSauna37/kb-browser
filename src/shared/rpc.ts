@@ -105,7 +105,7 @@ export const rpcSchemas = {
   'cookies.import': z.object({ cookies: z.array(z.unknown()).optional() }),
   'storage.dump': empty,
   // storageState はブラウザ由来の外部 JSON をそのまま渡すため any(host が防御的に扱う)。
-  'storage.restore': z.object({ state: z.any() }),
+  'storage.restore': z.object({ state: z.any(), replace: z.boolean().optional() }),
 
   // --- ネットワーク監視・改変 ---
   'net.log': z.object({
@@ -143,7 +143,12 @@ export const rpcSchemas = {
   'ws.close': z.object({ id: z.number().int(), code: z.number().optional(), reason: z.string().optional(), tab }),
 
   // --- セッション診断 ---
-  'session.check': z.object({ url: z.string(), api: z.string().optional(), timeoutMs: z.number().optional() }),
+  'session.check': z.object({
+    url: z.string(),
+    api: z.string().optional(),
+    expectSelector: z.string().optional(),
+    timeoutMs: z.number().optional(),
+  }),
 
   // --- コンソール / DOM ---
   'console.log': z.object({ tab, since: z.number().optional(), limit: z.number().optional() }),

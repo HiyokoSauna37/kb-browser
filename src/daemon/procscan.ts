@@ -24,6 +24,60 @@ function norm(s: string): string {
   return process.platform === 'win32' ? s.toLowerCase() : s;
 }
 
+function normPath(s: string): string {
+  return norm(s).replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+/** Chromium 系プロセスの --user-data-dir をコマンドラインから取り出す。 */
+function commandUserDataDir(cmd: string): string | null {
+  // Windows の CommandLine は、空白を含む argv を
+  //   "--user-data-dir=C:\path with spaces"
+  // のように引数全体で quote する。一方 ps 等では
+  //   --user-data-dir="/path with spaces"
+  // や `--user-data-dir /path` もあり得るため、既知の表記を明示的に扱う。
+  const patterns = [
+    /"--user-data-dir=([^"]+)"/i,
+    /'--user-data-dir=([^']+)'/i,
+    /--user-data-dir=(?:"([^"]+)"|'([^']+)')/i,
+    /(?:"--user-data-dir"|'--user-data-dir'|--user-data-dir)\s+(?:"([^"]+)"|'([^']+)')/i,
+    /--user-data-dir=([^\s"']+)(?=\s+--[a-z0-9][a-z0-9-]*(?:=|\s|$)|$)/i,
+    // Linux の ps は execve argv の引用符を保持せず、空白入りの 1 引数を
+    //   --user-data-dir=/tmp/kb signup/profile --no-first-run
+    // のように表示することがある。次の Chromium flag までを値として扱う。
+    /--user-data-dir=(.+?)(?=\s+--[a-z0-9][a-z0-9-]*(?:=|\s|$)|$)/i,
+    /(?:"--user-data-dir"|'--user-data-dir'|--user-data-dir)\s+(.+?)(?=\s+--[a-z0-9][a-z0-9-]*(?:=|\s|$)|$)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = cmd.match(pattern);
+    const value = match?.slice(1).find((part): part is string => part != null);
+    if (value) return value;
+  }
+  return null;
+}
+
+/**
+ * 指定 profile を現在保持しているプロセスを列挙する。
+ * bootstrap の親 PID が Chrome の process singleton へ引き渡して終了しても、実際に
+ * user-data-dir を開いている browser/gpu process を検出して adopt の同時利用を防ぐ。
+ */
+export function findProfileProcesses(procs: ProcInfo[], profileDir: string, selfPid: number): number[] {
+  const expected = normPath(profileDir);
+  return procs
+    .filter((proc) => proc.pid !== selfPid)
+    .filter((proc) => {
+      const actual = commandUserDataDir(proc.cmd);
+      return actual != null && normPath(actual) === expected;
+    })
+    .map((proc) => proc.pid);
+}
+
+/** `--type=...` を持たない browser main process を優先して返す。 */
+export function findProfileBrowserProcess(procs: ProcInfo[], profileDir: string, selfPid: number): number | null {
+  const matches = new Set(findProfileProcesses(procs, profileDir, selfPid));
+  const rows = procs.filter((proc) => matches.has(proc.pid));
+  return rows.find((proc) => !/(?:^|[\s"'])--type(?:=|\s)/i.test(proc.cmd))?.pid ?? rows[0]?.pid ?? null;
+}
+
 /**
  * プロセス一覧から「この KB_HOME に属する kb デーモン」の pid を抽出する。
  *

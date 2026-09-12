@@ -70,6 +70,8 @@ export type SessionVerdict =
   | 'target-protected'
   /** そのホストの Cookie が 1 つもない(未ログイン / 未通過)。 */
   | 'no-session'
+  /** HTTP は正常でも呼び出し側が要求したログイン済み要素が見つからない。 */
+  | 'expectation-failed'
   /** そもそも到達できない。 */
   | 'unreachable';
 
