@@ -195,7 +195,7 @@ kb signup status target-a
 
 通常 Chrome は adopt 前に必ず**ウィンドウから正常終了**してください。同じ profile を同時に開くと破損し得るため、kb デーモン稼働中や、その profile の `--user-data-dir` を保持する Chrome 子プロセスが残っている間は引き継ぎを拒否します。途中から再開する場合だけ `bootstrap ... --reuse-profile` を使います(カスタム profile/channel・元 proxy・成功条件・checkpoint は保持)。
 
-重要: 有効期限のない **session Cookie は通常 Chrome の正常終了で消える**ため、この方式では引き継げません。可能なら登録時に「ログイン状態を保持する」を選び、期限付き認証 Cookie を発行させてください。`--expect-cookie <名前>` を付ければ、消失を成功扱いせず検出できます。期限付き Cookie が発行されない対象では `kb login` または、対象のルール上許可される場合に `--cdp` を使います。
+重要: 有効期限のない **session Cookie は Chrome の版や session restore 方針により、正常終了時に消える場合と復元される場合があります**。この方式では維持を保証しません。可能なら登録時に「ログイン状態を保持する」を選び、期限付き認証 Cookie を発行させてください。`--expect-cookie <名前>` を付ければ、消失を成功扱いせず検出できます。期限付き Cookie が発行されない対象では `kb login` または、対象のルール上許可される場合に `--cdp` を使います。
 
 checkpoint にはログイン秘密情報が含まれるため、共有・コミットしないでください。また、この機能はチャレンジを自動突破するものではなく、許可された対象で人が正規に完了した登録状態を安全に引き継ぐためのものです。
 
@@ -211,7 +211,7 @@ kb login github.com --save gh-state.json              # ついでにファイル
 
 以降のセッションでは何もしなくてもログイン済みの状態で始まります。`--save` したファイルは `kb storage restore <file>` で別プロファイルや別マシンに持ち込めます。
 
-注意: 有効期限のない session cookie だけを使うサイトは、ブラウザの再起動でサインアウトされます(通常のブラウザと同じ挙動)。その場合も `kb storage dump / restore` で状態を引き継げます。`storage dump` は **HttpOnly を含む全 Cookie** + localStorage を書き出します(Playwright storageState 形式)。
+注意: 有効期限のない session cookie はブラウザの再起動・session restore 方針に従うため、再起動をまたいだ維持を保証できません。状態が残っている間に `kb storage dump / restore` を使えば明示的に引き継げます。`storage dump` は **HttpOnly を含む全 Cookie** + localStorage を書き出します(Playwright storageState 形式)。
 
 複数アカウントを同時に使いたい場合は、`KB_HOME` を分けてデーモンを 2 つ立てるのが現状の方法です(1 デーモン 1 プロファイル):
 

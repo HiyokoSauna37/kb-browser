@@ -238,11 +238,14 @@ describe(
 
       const checkpoint = JSON.parse(fs.readFileSync(adoptedState.checkpointPath, 'utf8'));
       assert.ok(checkpoint.cookies.some((cookie: any) => cookie.name === 'e2e_signup' && cookie.value === 'ready'));
-      assert.equal(
-        checkpoint.cookies.some((cookie: any) => cookie.name === 'e2e_session'),
-        false,
-        '通常 Chrome の正常終了では session Cookie は引き継げないことを明示的に固定する',
-      );
+      // expiry のない session Cookie は、Chrome の版・終了時の session restore 方針によって
+      // 消える場合と profile に復元される場合がある。signup handoff はその存否を保証せず、
+      // 成功条件には期限付き e2e_signup だけを使う。
+      const optionalSession = checkpoint.cookies.find((cookie: any) => cookie.name === 'e2e_session');
+      if (optionalSession) {
+        assert.equal(optionalSession.value, 'temporary');
+        assert.ok(optionalSession.expires == null || optionalSession.expires <= 0);
+      }
       assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'proxies.json'), 'utf8')).active, 'direct');
 
       const refreshed = await runCli(home, ['signup', 'checkpoint', 'local-target', '--timeout', '5'], 120_000);

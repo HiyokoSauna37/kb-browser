@@ -195,7 +195,7 @@ Only a check satisfying every condition is saved as a Cookie + localStorage chec
 
 Close the ordinary Chrome window **normally** before adopting. kb rejects handoff while its daemon or any Chrome child process still holds that profile's `--user-data-dir`, avoiding concurrent use and possible profile corruption. Use `bootstrap ... --reuse-profile` only to resume an existing signup; it preserves the custom profile/channel, original proxy, success conditions, and checkpoint.
 
-Important: an expiry-less **session cookie is removed when ordinary Chrome closes**, so this handoff cannot carry it. Select “keep me signed in” when available so the site issues a persistent authentication cookie. `--expect-cookie <name>` turns loss into a failed adoption instead of a false success. For targets that never issue persistent cookies, use `kb login`, or `--cdp` when the program rules allow it.
+Important: an expiry-less **session cookie may be removed or restored when ordinary Chrome closes**, depending on the browser version and session-restore policy. This handoff therefore does not guarantee it. Select “keep me signed in” when available so the site issues a persistent authentication cookie. `--expect-cookie <name>` turns loss into a failed adoption instead of a false success. For targets that never issue persistent cookies, use `kb login`, or `--cdp` when the program rules allow it.
 
 The checkpoint contains login secrets: do not share or commit it. This flow does not bypass challenges automatically; it safely hands off a registration that a human completed normally on an authorized target.
 
@@ -211,7 +211,7 @@ kb login github.com --save gh-state.json              # also back the state up t
 
 Subsequent sessions start already signed in — nothing to do. A `--save`d file can be carried to another profile or machine with `kb storage restore <file>`.
 
-Note: sites that rely purely on session cookies (no expiry) sign you out on browser restart, same as a regular browser. `kb storage dump / restore` covers that case too. `storage dump` exports **all cookies including HttpOnly** plus localStorage (Playwright storageState format).
+Note: expiry-less session cookies are subject to the browser's restart/session-restore policy, so persistence across a restart is not guaranteed. `kb storage dump / restore` can explicitly carry state while it is still available. `storage dump` exports **all cookies including HttpOnly** plus localStorage (Playwright storageState format).
 
 To use two accounts at the same time, run a second daemon with its own `KB_HOME` (one daemon = one profile):
 
