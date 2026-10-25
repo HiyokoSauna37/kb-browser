@@ -54,7 +54,7 @@ export interface LastRunOptions {
   channel?: 'chrome' | 'msedge' | 'chromium';
   /** context 全体の User-Agent 上書き。 */
   userAgent?: string;
-  /** ステルスモード(navigator.webdriver 消し + 最小 init script)。 */
+  /** ステルスモード(起動 flag で navigator.webdriver の露出を抑える。init script は使わない)。 */
   stealth?: boolean;
   /** アイドル自動終了の閾値(秒)。0 は無効。自動 spawn が引き継ぐ。 */
   idleTimeoutSec?: number;

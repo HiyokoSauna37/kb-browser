@@ -1,14 +1,10 @@
-import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { findProfileBrowserProcess, findProfileProcesses, listProcesses } from '../../daemon/procscan';
-import { isPidAlive, pingDaemon, rpc, rpcRaw } from '../../shared/client';
-import { readLastRun, writeLastRun } from '../../shared/paths';
-import { loadProxyConfig, resolveProfile, saveProxyConfig } from '../../shared/proxyStore';
+import { pingDaemon, rpcRaw } from '../../shared/client';
+import { loadProxyConfig } from '../../shared/proxyStore';
 import {
   bootstrapBrowserArgs,
-  classifyAdoption,
   listSignupStates,
   normalizeSignupUrl,
   readSignupState,
@@ -16,7 +12,6 @@ import {
   resolveSignupBootstrapSettings,
   signupCheckpointPath,
   signupProfilePath,
-  summarizeSignupCheck,
   validateExpectedCookie,
   validateExpectedSelector,
   validateSignupName,
@@ -25,10 +20,24 @@ import {
   type SignupState,
 } from '../../shared/signup';
 import { intOpt, print, run } from '../output';
+import {
+  launchSignupBrowser,
+  requireSignupDaemonStopped,
+  signupProfileProcessPids,
+} from '../signup/browser';
+import {
+  refreshSignupBrowserPhase,
+  signupStatusResult,
+} from '../signup/status';
+import {
+  AdoptionWorkflowError,
+  configureAdoptLastRun,
+  evaluateAdoption,
+  runAdoptionWorkflow,
+  setSignupProxyActive,
+} from '../signup/workflow';
 
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function errText(err: unknown): string {
+function errorText(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).split('\n')[0].slice(0, 500);
 }
 
@@ -38,165 +47,6 @@ function isNonEmptyDir(dir: string): boolean {
   } catch {
     return false;
   }
-}
-
-let processSnapshot: { at: number; rows: ReturnType<typeof listProcesses> } | undefined;
-
-function currentProcesses(): ReturnType<typeof listProcesses> {
-  const now = Date.now();
-  if (!processSnapshot || now - processSnapshot.at > 500) processSnapshot = { at: now, rows: listProcesses() };
-  return processSnapshot.rows;
-}
-
-function profileProcessPids(profile: string, bootstrapPid?: number): number[] {
-  const rows = currentProcesses();
-  const pids = findProfileProcesses(rows, signupProfilePath(profile), process.pid);
-  if (bootstrapPid && isPidAlive(bootstrapPid) && !pids.includes(bootstrapPid)) {
-    const row = rows.find((proc) => proc.pid === bootstrapPid);
-    // プロセス一覧そのものが取れないか CommandLine が権限上読めない場合だけ、起動時 PID を
-    // fallback に使う。PID が別の通常プロセスへ再利用された場合は profile 使用中と誤判定しない。
-    if (rows.length === 0 || !row?.cmd) pids.unshift(bootstrapPid);
-  }
-  return pids;
-}
-
-async function requireDaemonStopped(): Promise<void> {
-  const info = await pingDaemon();
-  if (!info) return;
-  const status = await rpcRaw(info, 'daemon.status').catch(() => null);
-  const detail = status ? ` (profile=${status.profile}, pid=${info.pid})` : ` (pid=${info.pid})`;
-  throw new Error(
-    `signup bootstrap/adopt は通常 Chrome と kb が profile を奪い合わないよう、デーモン停止中だけ実行できます${detail}。` +
-      '`kb daemon stop` 後に再実行してください。',
-  );
-}
-
-async function launchUncontrolledBrowser(executable: string, args: string[], profile: string): Promise<number> {
-  const child = spawn(executable, args, {
-    detached: true,
-    stdio: 'ignore',
-    // signup は人が操作するブラウザなので、Windows でもウィンドウを隠さない。
-    windowsHide: false,
-  });
-  await new Promise<void>((resolve, reject) => {
-    child.once('spawn', resolve);
-    child.once('error', reject);
-  });
-  // Windows Chrome は既存の Chrome プロセスへ起動要求を渡し、spawn した親自身は
-  // exit=0 で即終了することがある。PID 生存ではなく user-data-dir の実利用を一次情報にする。
-  await delay(700);
-  let profilePids: number[] = [];
-  for (let attempt = 0; attempt < 4; attempt++) {
-    processSnapshot = undefined;
-    profilePids = profileProcessPids(profile);
-    if (profilePids.length || child.exitCode == null) break;
-    await delay(300);
-  }
-  if (child.exitCode != null && profilePids.length === 0) {
-    throw new Error(`通常ブラウザが起動直後に終了し、profile を保持するプロセスも見つかりませんでした(exit=${child.exitCode})`);
-  }
-  const pid = findProfileBrowserProcess(currentProcesses(), signupProfilePath(profile), process.pid) ?? profilePids[0] ?? child.pid;
-  if (!pid) throw new Error('通常ブラウザの PID を取得できませんでした');
-  child.unref();
-  return pid;
-}
-
-function refreshBrowserPhase(state: SignupState): SignupState {
-  if (state.phase === 'browser-running' && profileProcessPids(state.profile, state.bootstrapPid).length === 0) {
-    const next = { ...state, phase: 'ready-to-adopt' as const };
-    writeSignupState(next);
-    return next;
-  }
-  return state;
-}
-
-function signupNextAction(state: SignupState, browserRunning: boolean): string {
-  if (browserRunning) return `通常 Chrome で登録・Turnstile・OTP を完了し、ウィンドウを閉じてから kb signup adopt ${state.name}`;
-  switch (state.phase) {
-    case 'ready-to-adopt':
-      return `kb signup adopt ${state.name}${state.checkUrl ? '' : ' --check-url <ログイン後URL>'}`;
-    case 'adopting':
-      return `前回の adopt が中断されました。kb daemon stop 後に kb signup adopt ${state.name} を再実行してください`;
-    case 'challenge-after-adopt':
-    case 'degraded-after-adopt':
-      return `kb daemon stop 後、kb signup bootstrap ${state.name} ${state.url} --reuse-profile で通常 Chrome 側を確認`;
-    case 'proxy-challenge':
-    case 'proxy-degraded':
-      return `direct への rollback は確認済みです。profile "${state.profile}" は使用可能ですが、proxy "${state.proxyBefore}" の経路・指紋を確認してください`;
-    case 'failed':
-      return `kb daemon stop 後、kb signup bootstrap ${state.name} ${state.url} --reuse-profile で通常 Chrome に戻して確認`;
-    default:
-      return `profile "${state.profile}" を kb で使用できます。必要なら kb signup checkpoint ${state.name}`;
-  }
-}
-
-function statusResult(state: SignupState) {
-  const browserPids = state.phase === 'browser-running' ? profileProcessPids(state.profile, state.bootstrapPid) : [];
-  const browserRunning = browserPids.length > 0;
-  return {
-    ...state,
-    browserRunning,
-    browserPids,
-    profilePath: signupProfilePath(state.profile),
-    checkpointExists: !!state.checkpointPath && fs.existsSync(state.checkpointPath),
-    nextAction: signupNextAction(state, browserRunning),
-  };
-}
-
-interface AdoptionEvaluation {
-  check: any;
-  phase: SignupState['phase'];
-  summary: ReturnType<typeof summarizeSignupCheck>;
-  storageState: any;
-}
-
-async function evaluateAdoption(
-  checkUrl: string,
-  opts: { api?: string; timeoutMs: number; expectSelector?: string; expectCookie?: string; proxy: string },
-): Promise<AdoptionEvaluation> {
-  const check = await rpc('session.check', {
-    url: checkUrl,
-    api: opts.api,
-    expectSelector: opts.expectSelector,
-    timeoutMs: opts.timeoutMs,
-  });
-  const storageState = await rpc('storage.dump');
-  const cookieNames = Array.isArray(storageState?.cookies)
-    ? storageState.cookies.map((cookie: any) => cookie?.name).filter((name: unknown): name is string => typeof name === 'string')
-    : [];
-  const expectations = { selector: opts.expectSelector, cookie: opts.expectCookie, cookieNames };
-  return {
-    check,
-    phase: classifyAdoption(check, checkUrl, expectations),
-    summary: summarizeSignupCheck(check, checkUrl, opts.proxy, expectations),
-    storageState,
-  };
-}
-
-function setProxyActive(name: string): void {
-  const cfg = loadProxyConfig();
-  resolveProfile(cfg, name);
-  cfg.active = name;
-  saveProxyConfig(cfg);
-}
-
-function configureAdoptLastRun(state: SignupState, stealth: boolean): void {
-  const last = readLastRun();
-  writeLastRun({
-    ...last,
-    headless: false,
-    profile: state.profile,
-    channel: state.channel,
-    // bootstrap は通常 Chrome の既定 UA。以前の別 target 用上書きを引き継ぐと
-    // cf_clearance と UA が食い違うため明示的に消す。
-    userAgent: undefined,
-    stealth,
-    // 未パック拡張や init script 系ホットキーは signup 引き継ぎ直後の指紋を変えるので外す。
-    extensions: undefined,
-    detachKey: undefined,
-    translateKey: undefined,
-    ignoreHttpsErrors: false,
-  });
 }
 
 /** Cloudflare/Turnstile を通常 Chrome で人が通過し、その profile を kb へ引き継ぐ。 */
@@ -221,7 +71,7 @@ export function registerSignupCommands(program: Command): void {
       run(async (rawName: string, rawUrl: string, opts: { profile?: string; checkUrl?: string; expectSelector?: string; expectCookie?: string; channel?: string; browserPath?: string; systemProxy?: boolean; direct?: boolean; reuseProfile?: boolean }) => {
         const name = validateSignupName(rawName);
         const url = normalizeSignupUrl(rawUrl);
-        await requireDaemonStopped();
+        await requireSignupDaemonStopped();
 
         const existing = readSignupState(name);
         const settings = resolveSignupBootstrapSettings(name, url, existing, {
@@ -230,7 +80,7 @@ export function registerSignupCommands(program: Command): void {
         });
         const { profile, channel, checkUrl, expectSelector, expectCookie, direct, proxyBefore } = settings;
 
-        const runningPids = profileProcessPids(profile, existing?.bootstrapPid);
+        const runningPids = signupProfileProcessPids(profile, existing?.bootstrapPid);
         if (runningPids.length) {
           throw new Error(`signup "${name}" の通常 Chrome は既に起動中です(pid=${runningPids.join(',')})`);
         }
@@ -241,7 +91,7 @@ export function registerSignupCommands(program: Command): void {
         fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
 
         const browserPath = resolveBrowserExecutable(channel, settings.browserPathHint);
-        const pid = await launchUncontrolledBrowser(browserPath, bootstrapBrowserArgs(profileDir, url, { direct }), profile);
+        const pid = await launchSignupBrowser(browserPath, bootstrapBrowserArgs(profileDir, url, { direct }), profile);
         const now = new Date().toISOString();
         const state: SignupState = {
           ...existing,
@@ -263,7 +113,7 @@ export function registerSignupCommands(program: Command): void {
           error: undefined,
         };
         writeSignupState(state);
-        print(statusResult(state), (r) =>
+        print(signupStatusResult(state), (r) =>
           `通常 ${channel === 'chrome' ? 'Chrome' : 'Edge'} を起動しました(pid=${pid}, profile=${profile}, ${direct ? 'direct' : 'system proxy'})\n` +
           'Playwright / CDP / remote debugging / automation フラグは使用していません。\n' +
           `登録・Turnstile・メール/SMS確認を人が完了し、ブラウザを閉じてから:\n  kb signup adopt ${name}` +
@@ -290,12 +140,12 @@ export function registerSignupCommands(program: Command): void {
         const name = validateSignupName(rawName);
         let state = readSignupState(name);
         if (!state) throw new Error(`signup "${name}" はありません。kb signup bootstrap ${name} <url> を先に実行してください`);
-        state = refreshBrowserPhase(state);
-        const runningPids = profileProcessPids(state.profile, state.bootstrapPid);
+        state = refreshSignupBrowserPhase(state);
+        const runningPids = signupProfileProcessPids(state.profile, state.bootstrapPid);
         if (runningPids.length) {
           throw new Error(`通常 Chrome がまだ profile を使用中です(pid=${runningPids.join(',')})。登録完了後にそのウィンドウを閉じてから adopt してください`);
         }
-        await requireDaemonStopped();
+        await requireSignupDaemonStopped();
         const rawCheckUrl = opts.checkUrl ?? state.checkUrl;
         if (!rawCheckUrl) {
           throw new Error('登録完了を signup ページの 200 だけで誤判定しないよう、adopt には --check-url <dashboard/account URL> が必須です');
@@ -309,97 +159,22 @@ export function registerSignupCommands(program: Command): void {
         const timeoutMs = Math.max(1, opts.timeout) * 1000;
 
         // 引き継ぎの最初の判定は必ず direct。Caido/Burp の TLS/HTTP2 指紋を混ぜない。
-        setProxyActive('direct');
+        setSignupProxyActive('direct');
         configureAdoptLastRun(state, opts.stealth);
         state = { ...state, checkUrl, expectSelector, expectCookie, phase: 'adopting', error: undefined };
         writeSignupState(state);
 
         try {
-          const directEvaluation = await evaluateAdoption(checkUrl, {
+          state = await runAdoptionWorkflow(state, {
+            checkUrl,
             api,
             timeoutMs,
             expectSelector,
             expectCookie,
-            proxy: 'direct',
+            checkpointPath: path.resolve(opts.checkpoint ?? signupCheckpointPath(name)),
+            restoreProxy: !!opts.restoreProxy,
           });
-          const phase = directEvaluation.phase;
-          const checkpointPath = path.resolve(opts.checkpoint ?? signupCheckpointPath(name));
-          // 正常確認できた状態だけ checkpoint に昇格する。再 adopt が失敗しても
-          // 以前の正常 checkpoint をチャレンジ状態で上書きしない。
-          if (phase === 'adopted') writeSignupCheckpoint(checkpointPath, directEvaluation.storageState);
-          state = {
-            ...state,
-            phase,
-            adoptedAt: phase === 'adopted' ? new Date().toISOString() : state.adoptedAt,
-            checkpointPath: phase === 'adopted' ? checkpointPath : state.checkpointPath,
-            lastCheck: directEvaluation.summary,
-            postProxyCheck: undefined,
-            rollbackCheck: undefined,
-          };
-          writeSignupState(state);
-
-          if (opts.restoreProxy && phase === 'adopted' && state.proxyBefore !== 'direct') {
-            let postEvaluation: AdoptionEvaluation | undefined;
-            let proxyError: string | undefined;
-            try {
-              setProxyActive(state.proxyBefore);
-              await rpc('proxy.reload');
-              postEvaluation = await evaluateAdoption(checkUrl, {
-                api,
-                timeoutMs,
-                expectSelector,
-                expectCookie,
-                proxy: state.proxyBefore,
-              });
-            } catch (err) {
-              proxyError = errText(err);
-            }
-
-            if (postEvaluation?.phase === 'adopted') {
-              state = {
-                ...state,
-                phase: 'adopted-proxy',
-                postProxyCheck: postEvaluation.summary,
-                rollbackCheck: undefined,
-                error: undefined,
-              };
-              // proxy 経路で発行・更新された Cookie も正常 checkpoint に含める。
-              writeSignupCheckpoint(checkpointPath, postEvaluation.storageState);
-            } else {
-              state = {
-                ...state,
-                phase: postEvaluation?.phase === 'challenge-after-adopt' ? 'proxy-challenge' : 'proxy-degraded',
-                postProxyCheck: postEvaluation?.summary,
-                error: proxyError ? `proxy validation: ${proxyError}` : undefined,
-              };
-              setProxyActive('direct');
-              await rpc('proxy.reload');
-              // proxy 側のチャレンジが Cookie を更新・削除していても direct の正常状態へ戻す。
-              // signup 専用 profile なので全 Cookie を checkpoint へ正確に戻してよい。
-              const restored = await rpc('storage.restore', { state: directEvaluation.storageState, replace: true });
-              if (restored.skippedOrigins?.length) {
-                throw new Error(`checkpoint rollback で localStorage を復元できませんでした: ${restored.skippedOrigins.join(', ')}`);
-              }
-              const rollbackEvaluation = await evaluateAdoption(checkUrl, {
-                api,
-                timeoutMs,
-                expectSelector,
-                expectCookie,
-                proxy: 'direct',
-              });
-              state.rollbackCheck = rollbackEvaluation.summary;
-              if (rollbackEvaluation.phase === 'adopted') {
-                // rollback の確認通信で更新された direct 側 Cookie も checkpoint に反映する。
-                writeSignupCheckpoint(checkpointPath, rollbackEvaluation.storageState);
-              } else {
-                state.phase = 'failed';
-                state.error = [state.error, `direct rollback verification: ${rollbackEvaluation.phase}`].filter(Boolean).join('; ');
-              }
-            }
-            writeSignupState(state);
-          }
-
-          print(statusResult(state), (r) => {
+          print(signupStatusResult(state), (r) => {
             const c = r.lastCheck;
             const p = r.postProxyCheck;
             const lines = [
@@ -419,7 +194,8 @@ export function registerSignupCommands(program: Command): void {
             return lines.join('\n');
           });
         } catch (err) {
-          state = { ...state, phase: 'failed', error: errText(err) };
+          const failedState = err instanceof AdoptionWorkflowError ? err.state : state;
+          state = { ...failedState, phase: 'failed', error: errorText(err) };
           writeSignupState(state);
           throw err;
         }
@@ -435,7 +211,7 @@ export function registerSignupCommands(program: Command): void {
           const name = validateSignupName(rawName);
           const state = readSignupState(name);
           if (!state) throw new Error(`signup "${name}" はありません`);
-          const result = statusResult(refreshBrowserPhase(state));
+          const result = signupStatusResult(refreshSignupBrowserPhase(state));
           return print(result, (r) =>
             `${r.name}: ${r.phase} (profile=${r.profile}, browser=${r.browserRunning ? `running pid=${r.browserPids.join(',')}` : 'closed'}, proxy-before=${r.proxyBefore})\n` +
             `signup: ${r.url}${r.checkUrl ? `\ncheck: ${r.checkUrl}` : ''}` +
@@ -444,8 +220,8 @@ export function registerSignupCommands(program: Command): void {
             `next: ${r.nextAction}`,
           );
         }
-        const list = listSignupStates().map(refreshBrowserPhase).map(statusResult);
-        print(list, (items: ReturnType<typeof statusResult>[]) =>
+        const list = listSignupStates().map(refreshSignupBrowserPhase).map(signupStatusResult);
+        print(list, (items: ReturnType<typeof signupStatusResult>[]) =>
           items.length
             ? items.map((r) => `${r.name.padEnd(20)} ${r.phase.padEnd(23)} profile=${r.profile}${r.browserRunning ? ` pid=${r.browserPids.join(',')}` : ''}`).join('\n')
             : 'signup bootstrap の状態はありません',

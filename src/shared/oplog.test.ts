@@ -207,6 +207,10 @@ test('toCliString: 主要コマンドが再現可能な形になる', () => {
     "kb session check https://a/account --expect-selector '#account menu'",
   );
   assert.equal(toCliString(cmdEvent('request', { url: 'https://a/b', method: 'POST', data: '{"a":1}' })), `kb request https://a/b -X POST -d '{"a":1}'`);
+  assert.equal(
+    toCliString(cmdEvent('request', { url: 'https://a/api', viaBrowser: true, tab: 3 })),
+    'kb request https://a/api --via-browser -t 3',
+  );
 });
 
 test('toCurlCommand: Content-Type 未記録の JSON ボディは application/json を補完', () => {
@@ -261,6 +265,14 @@ test('requestFiles: net イベントと kb request コマンドから .sh が生
   assert.match(files[1].name, /^0009-PUT-a\.example_api\.sh$/);
   assert.match(files[1].content, /-H 'x-k: v'/);
   assert.match(files[1].content, /--data '\{"a":1\}'/);
+});
+
+test('requestFiles: browser 経由 request は curl でなく同じ kb 経路を再現する', () => {
+  const [file] = requestFiles([
+    cmdEvent('request', { url: 'https://a.example/api', viaBrowser: true, tab: 4 }, { seq: 7 }),
+  ]);
+  assert.match(file.content, /kb request https:\/\/a\.example\/api --via-browser -t 4/);
+  assert.doesNotMatch(file.content, /curl /);
 });
 
 test('reportMarkdown / stepsMarkdown: コマンドがステップ化され通信がぶら下がる', () => {

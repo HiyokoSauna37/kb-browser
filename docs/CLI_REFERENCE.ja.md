@@ -24,7 +24,7 @@ kb [グローバルオプション] <コマンド> [サブコマンド] [引数]
 
 <code>kb help [command]</code> でも指定コマンドのヘルプを表示できます。各階層で <code>kb &lt;command&gt; [subcommand] --help</code> も利用できます。
 
-<code>--json</code> の成功時は <code>{"ok":true,"result":...}</code>、失敗時は <code>{"ok":false,"error":"..."}</code> の形です。追従表示では JSON Lines 形式になります。
+コマンドの action 実行後は、<code>--json</code> の成功時が <code>{"ok":true,"result":...}</code>、失敗時が <code>{"ok":false,"error":"..."}</code> の形です。必須引数不足や未知のオプションなど Commander が action 前に検出する構文エラーは、stderr のテキストと終了コード 1 になります。追従表示では JSON Lines 形式になります。
 
 ### 自動起動と出力上限
 
@@ -170,7 +170,7 @@ kb daemon start --headless --idle-timeout 0
 
 ### <code>kb request &lt;url&gt;</code>
 
-ブラウザコンテキストの Cookie を利用して HTTP リクエストを送ります。
+既定ではブラウザコンテキストの Cookie jar と proxy を共有するページ非依存 HTTP リクエストを送ります。<code>--via-browser</code> では Verify 済みタブ内の同一 origin fetch を使い、Cookie / TLS / UA / Origin をそのページと揃えます。
 
 | オプション | 値・既定値 | 説明 |
 |---|---|---|
@@ -180,13 +180,17 @@ kb daemon start --headless --idle-timeout 0
 | <code>--data-file &lt;path&gt;</code> | — | 本文をファイルから読む |
 | <code>--no-follow</code> | — | リダイレクトを追跡しない |
 | <code>--follow-verbose</code> | — | リダイレクト履歴も表示 |
+| <code>--via-browser</code> | 無効 | active tab 内の同一 origin fetch で送信 |
+| <code>-t, --tab &lt;id&gt;</code> | active tab | <code>--via-browser</code> で使うタブ |
 | <code>--timeout &lt;sec&gt;</code> | 30 秒 | タイムアウト |
 | <code>-o, --out &lt;file&gt;</code> | — | レスポンス本文の保存先。バイナリ取得にも使用 |
 | <code>-i, --include</code> | — | レスポンスヘッダーを含める |
 | <code>--max-chars &lt;n&gt;</code> | 20,000 | 表示する最大文字数。<code>0</code> で無制限 |
 | <code>--offset &lt;n&gt;</code> | <code>0</code> | 表示開始位置 |
 
-リダイレクトは既定で追跡します。レスポンスの <code>Set-Cookie</code> は常に表示され、<code>--include</code> を付けると全レスポンスヘッダーを表示します。
+通常モードではリダイレクトを既定で追跡し、レスポンスの <code>Set-Cookie</code> を常に表示します。<code>--include</code> を付けると全レスポンスヘッダーを表示します。
+
+<code>--via-browser</code> は通常の CSP / CORS / Fetch 制約を受けます。<code>Cookie</code>、<code>User-Agent</code>、<code>Origin</code>、<code>Sec-*</code> 等のブラウザ管理ヘッダーは指定できません。GET / HEAD では body を指定できません。Fetch API が中間 redirect と <code>Set-Cookie</code> を公開しないため、<code>--no-follow</code> / <code>--follow-verbose</code> とは併用できず、Set-Cookie 値は結果に含まれません（Cookie jar への反映はブラウザが行います）。
 
 ## ページ操作
 
@@ -329,7 +333,7 @@ bootstrap / adopt の進行状況と保存情報を表示します。名前を�
 
 ### <code>kb session check &lt;url&gt;</code>
 
-HTTP 応答、遷移先、HTML、Cookie、期待要素を使ってセッション状態を診断します。
+HTTP 応答、遷移先、HTML、Cookie、期待要素を使ってセッション状態を診断します。実効 User-Agent と UA Client Hints の Chrome major、custom UA の整合性、使用中 proxy も表示し、challenge loop の条件を値を漏らさず確認できます。
 
 | オプション | 値・既定値 | 説明 |
 |---|---|---|
@@ -436,6 +440,8 @@ kb login https://example.com/login --until "https://example.com/app/**" --save e
 | <code>--mask-jwt &lt;mode&gt;</code> | <code>signature</code> | <code>signature</code> / <code>full</code> / <code>off</code> |
 
 <code>kb log export</code> は同じマスク関連オプションと <code>--session &lt;name&gt;</code> に加え、<code>-o, --out &lt;dir&gt;</code> で出力先を指定します。出力先の既定は <code>./kb-log-&lt;session&gt;</code> です。
+
+export の <code>requests/</code> は観測した net event を調査用の best-effort curl として保存します。<code>--via-browser</code> の command event は browser-managed な Cookie / UA / Origin / TLS を保つため、同じ <code>kb request --via-browser</code> コマンドとしても別途保存します。
 
 ### <code>kb log replay [session]</code>
 
@@ -579,7 +585,7 @@ MCP の主な既定値:
 - <code>kb_translate</code> は <code>to: ja</code>、<code>from: auto</code>、<code>inPlace: true</code>
 - <code>kb_net_log.limit</code>、<code>kb_ws_log.limit</code>、<code>kb_ws_recv.limit</code>、<code>kb_console_log.limit</code> は 50、<code>kb_dom_query.limit</code> は 20
 - <code>kb_ws_connect.timeoutSec</code> は 15、<code>kb_request.timeoutSec</code> は 30、<code>kb_wait.timeoutSec</code> は 90（最大 280）
-- <code>kb_request.method</code> は <code>GET</code>。<code>includeHeaders</code> と <code>followVerbose</code> は <code>false</code>
+- <code>kb_request.method</code> は <code>GET</code>。<code>includeHeaders</code>、<code>followVerbose</code>、<code>viaBrowser</code> は <code>false</code>
 - そのほかの省略可能な boolean は、特記がない限り <code>false</code>
 
 | ツール | 用途 | パラメーター |
@@ -610,7 +616,7 @@ MCP の主な既定値:
 | <code>kb_ws_recv</code> | WebSocket受信バッファをカーソル読み | <code>id: number</code>, <code>since?: number</code>, <code>limit?: number</code>, <code>tab?: number</code> |
 | <code>kb_ws_list</code> | kbが開いたWebSocket一覧 | <code>tab?: number</code> |
 | <code>kb_ws_close</code> | WebSocketを閉じる | <code>id: number</code>, <code>code?: number</code>, <code>reason?: string</code>, <code>tab?: number</code> |
-| <code>kb_request</code> | Cookie・プロキシ共有のHTTPリクエスト | <code>url: string</code>, <code>method?: string</code>, <code>headers?: Record&lt;string,string&gt;</code>, <code>data?: string</code>, <code>timeoutSec?: number</code>, <code>includeHeaders?: boolean</code>, <code>followVerbose?: boolean</code>, <code>maxChars?: number</code>, <code>offset?: number</code> |
+| <code>kb_request</code> | Cookie・proxy 共有のHTTP。<code>viaBrowser</code> で Verify 済み同一 origin タブ内 fetch | <code>url: string</code>, <code>method?: string</code>, <code>headers?: Record&lt;string,string&gt;</code>, <code>data?: string</code>, <code>timeoutSec?: number</code>, <code>includeHeaders?: boolean</code>, <code>followVerbose?: boolean</code>, <code>viaBrowser?: boolean</code>, <code>tab?: number</code>, <code>maxChars?: number</code>, <code>offset?: number</code> |
 | <code>kb_console_log</code> | ページconsoleログを取得 | <code>limit?: number</code>, <code>tab?: number</code> |
 | <code>kb_dom_query</code> | CSSセレクターでDOMを検査 | <code>selector: string</code>, <code>html?: boolean</code>, <code>attr?: string</code>, <code>limit?: number</code>, <code>frame?: string</code>, <code>tab?: number</code> |
 | <code>kb_wait</code> | URL、要素、network idleを待機 | <code>url?: string</code>, <code>selector?: string</code>, <code>selectorGone?: string</code>, <code>idle?: boolean</code>, <code>any?: boolean</code>, <code>timeoutSec?: number</code>, <code>tab?: number</code> |

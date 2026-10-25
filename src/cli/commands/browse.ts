@@ -206,13 +206,15 @@ export function registerBrowseCommands(program: Command): void {
 
   program
     .command('request <url>')
-    .description('ページを開かずに HTTP リクエストを送る(Cookie とプロキシ設定はブラウザと共有。ミニ REST クライアント)')
+    .description('HTTP リクエストを送る(既定はページ非依存。--via-browser は Verify 済みタブと同じブラウザ経路)')
     .option('-X, --method <method>', 'HTTP メソッド', 'GET')
     .option('-H, --header <header>', '"Name: value" 形式のヘッダ(複数指定可)', (v: string, acc: string[]) => [...acc, v], [] as string[])
     .option('-d, --data <body>', 'リクエストボディ')
     .option('--data-file <path>', 'ボディをファイルから読み込む')
     .option('--no-follow', 'リダイレクトを追わない')
     .option('--follow-verbose', 'リダイレクトを追いつつ各ホップの status / Location / Set-Cookie を表示する')
+    .option('--via-browser', 'active tab 内の同一 origin fetch で送る(Cookie / TLS / UA / Origin を Verify 済みページと共有)')
+    .option('-t, --tab <id>', '--via-browser で使うタブ ID(省略時は active tab)', intOpt)
     .option('--timeout <sec>', 'タイムアウト秒数', intOpt, REQUEST_TIMEOUT_SEC)
     .option('-o, --out <file>', 'レスポンス本文をファイルに保存する(バイナリ向け)')
     .option('-i, --include', 'レスポンスヘッダも表示する')
@@ -229,6 +231,8 @@ export function registerBrowseCommands(program: Command): void {
             dataFile?: string;
             follow: boolean;
             followVerbose?: boolean;
+            viaBrowser?: boolean;
+            tab?: number;
             timeout: number;
             out?: string;
             include?: boolean;
@@ -238,6 +242,10 @@ export function registerBrowseCommands(program: Command): void {
         ) => {
           if (opts.data !== undefined && opts.dataFile) throw new Error('--data と --data-file は同時に指定できません');
           if (opts.followVerbose && !opts.follow) throw new Error('--follow-verbose と --no-follow は同時に指定できません');
+          if (opts.viaBrowser && (!opts.follow || opts.followVerbose)) {
+            throw new Error('--via-browser は --no-follow / --follow-verbose と併用できません');
+          }
+          if (opts.tab != null && !opts.viaBrowser) throw new Error('--tab は --via-browser と併用してください');
           const data = opts.dataFile ? fs.readFileSync(path.resolve(opts.dataFile), 'utf8') : opts.data;
           const headers = parseHeaderArgs(opts.header);
           const r = await rpc('request', {
@@ -248,6 +256,8 @@ export function registerBrowseCommands(program: Command): void {
             timeoutMs: opts.timeout * 1000,
             follow: opts.follow,
             verbose: opts.followVerbose,
+            viaBrowser: opts.viaBrowser,
+            tab: opts.tab,
             savePath: opts.out ? path.resolve(opts.out) : undefined,
             maxChars: opts.maxChars,
             offset: opts.offset,
@@ -257,7 +267,7 @@ export function registerBrowseCommands(program: Command): void {
             const hops = r.hops ?? [];
             const chain = hops.length ? redirectHopLines(hops) + '\n' : '';
             const finalUrl = hops.length ? `  ${r.url}` : '';
-            let out = `${chain}HTTP ${r.status} ${r.statusText}${finalUrl} (${r.ms}ms${hops.length ? ' total' : ''}, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''})`;
+            let out = `${chain}HTTP ${r.status} ${r.statusText}${finalUrl} (${r.ms}ms${hops.length ? ' total' : ''}, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''}${opts.viaBrowser ? ', via=browser' : ''})`;
             if (!hops.length && r.url !== url) out += `\n→ ${r.url}`;
             const setCookies: string[] = r.setCookies ?? [];
             if (opts.include) {

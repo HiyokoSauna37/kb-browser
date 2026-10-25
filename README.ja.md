@@ -18,27 +18,27 @@ English version: [README.md](README.md)
 GUI ブラウザが持つ機能 — ページのレンダリング、Cookie 管理、DevTools 操作(Network / Console / Elements)— を `kb` コマンドで扱えます。FoxyProxy 風のプロキシプロファイル管理(**ブラウザ無再起動の即時切替**、ホスト別振り分けルール)を内蔵。Claude Code などの AI エージェントから Bash / MCP 経由で操作することを想定しつつ、ウィンドウは本物の Chrome なので人間の手動操作といつでも併用できます。
 
 > **想定している 2 つの使い方:**
-> - **AI エージェントから操作** — Claude Code などのエージェントが **MCP(34 ツール)** または **Bash**(全コマンド `--json` 対応)で kb を駆動。アクセシビリティ snapshot + `--ref` のループは低トークンで確実な自動操作に最適化され、常駐デーモンにより各操作は数十 ms で返る。
+> - **AI エージェントから操作** — Claude Code などのエージェントが **MCP(34 ツール)** または **Bash**(action 結果は全コマンド `--json` 対応)で kb を駆動。アクセシビリティ snapshot + `--ref` のループは低トークンで確実な自動操作に最適化され、常駐デーモンにより各操作は数十 ms で返る。
 > - **セキュリティ調査・バグバウンティの recon**(認可されたテスト限定)— セッション共有 HTTP、ネットワークのライブ監視/改変、認証済み SPA での生 `eval`、Burp/Caido への proxy チェーン、プロファイルによる 2 アカウント IDOR、機微値マスク済みの共有可能な証跡バンドル。詳細は [セキュリティ調査・バグバウンティの recon](#セキュリティ調査バグバウンティの-recon) を参照。
 
 ## 特徴
 
 - **デーモン常駐** — ブラウザは起動しっぱなし。各 CLI コマンドは数十 ms で返る
-- **本物の Chrome・通常ブラウザとして振る舞う** — インストール済み Chrome/Edge を使用(DRM も有効)。なければ同梱 Chromium にフォールバック。`--channel` で明示選択、`--ua` で User-Agent 上書き。**ステルスは既定 ON**(`navigator.webdriver` を隠すので Cloudflare 等に「自動化ブラウザ」と弾かれにくい)。`--no-stealth` で無効化。硬いチャレンジ(Cloudflare Turnstile / Managed Challenge)は「1 回だけ人手で解いて永続化」する — [ボットチェックを通す](#ボットチェックを通す)参照
+- **インストール済み Chrome/Edge を利用** — DRM を含む実ブラウザを優先し、なければ同梱 Chromium にフォールバック。`--channel` で明示選択、`--ua` で UA 上書き。ステルスは既定 ON で基本的な `navigator.webdriver` 露出を抑えるが、Cloudflare production challenge の通過は保証しない。人による Verify と通信経路の維持は [ボットチェックを通す](#ボットチェックを通す)参照
 - **タブを別ウィンドウへ分離** — `kb tabs detach <id...>` で 1 つ以上のタブをまとめて新しい 1 枚のウィンドウへ(`--detach-key` でキー割り当ても)。[タブの分離](#タブの分離)参照
 - **ページを翻訳** — `kb translate` が Chrome の「このページを翻訳」相当に本文を in-place で日本語化(`--toggle` で翻訳⇄原文、`--text` で出力のみ、`--translate-key` でキー割り当て)。[ページの翻訳](#ページの翻訳)参照
 - **起動済みブラウザへのアタッチ** — `kb daemon start --cdp http://127.0.0.1:9222` で、`--remote-debugging-port` 付きで起動した Chrome/Edge にそのまま接続し、そのサインイン状態を再利用できる
 - **Chrome 拡張機能** — `kb daemon start --extensions <拡張dir,...>` で解凍済み拡張を読み込む(`on` でプロファイルにインストール済みの拡張を有効化、`off` で解除)。詳細は [Chrome 拡張機能](#chrome-拡張機能) を参照
 - **エージェント最適化** — `kb snapshot` が要素 ref 付きアクセシビリティツリーを返し、`kb click --ref e12` で確実に操作(iframe 内も対応)。再レンダで ref が失効しても同じ role/name の要素へ**自動再解決**。text / html / snapshot は既定 20000 文字で切り詰め、`--offset` で続きを取得。`kb eval` は await・複数行コードもそのまま実行可
 - **ターミナルから DevTools** — ネットワークログ / レスポンス本文 (`kb net body`) / 全ヘッダ (`kb net headers`) / リクエスト遮断 / レスポンスモック(既存リクエストのエラー差し替えも)/ HAR 記録 / コンソール / DOM 検査
-- **ミニ REST クライアント** — `kb request` でページを開かずに API を直接叩ける。Cookie とプロキシ設定はブラウザと共有(ログイン済みの API をそのまま呼べる)
+- **2 経路の HTTP クライアント** — `kb request` はページ非依存、`--via-browser` は Verify 済みタブ内の同一 origin fetch。後者は Cookie だけでなく TLS・UA・Origin も同じブラウザ経路を使う
 - **プロキシプロファイル** — `host:port`(+認証)を名前付きで保存、無再起動で即時切替。特定ホストだけ特定プロキシへ(FoxyProxy 風ルール)。Chromium 非対応の SOCKS5 認証は内蔵中継が代行(中継自体もトークン認証で保護)
-- **headed ⇄ headless / プロファイル切替** — タブと Cookie は復元される
+- **headed ⇄ headless / プロファイル切替** — タブ URL は復元し、Cookie は各プロファイル内で分離・永続化
 - **ログイン状態の永続化** — 一度サインインすればプロファイルに自動保存され、次回以降も維持。`kb login` で手動サインインの流れをコマンド一つに。`kb storage dump / restore` でファイルへの持ち出しも可
-- **操作記録** — 実行した操作・通信・コンソールを既定で常時記録。`kb log export` で「レポート + 再現手順 + curl 単体再実行 + スクショ」の自己完結バンドルを生成(機微な値は既定でマスク)
+- **操作記録** — 実行した操作・通信・コンソールを既定で常時記録。`kb log export` で「レポート + 再現手順 + request script + スクショ」のレビュー・再実行用バンドルを生成(機微な値は既定でマスク)
 - **人間との協調** — 自動操作中でもログインや CAPTCHA はユーザーがウィンドウで直接操作し、`kb wait` で完了を検知して再開
 - **MCP サーバ** — `kb-mcp` が 34 ツールを公開(スクリーンショットは画像で返る)
-- **全コマンド `--json`** — スクリプト・エージェント向けの機械可読出力
+- **action 結果の `--json`** — 全コマンドで使えるスクリプト・エージェント向けの機械可読出力
 
 ## インストール
 
@@ -74,7 +74,7 @@ kb daemon stop             # ブラウザごと終了
 | ナビゲーション | `kb back` / `kb forward` / `kb reload` / `kb scroll [--to <sel>/--bottom]` |
 | 操作 | `kb click` / `kb fill` / `kb select [--label]` / `kb check` / `kb uncheck` / `kb hover` / `kb upload <sel> <ローカルファイルパス...>` / `kb press <key>` / `kb eval <js> [--file f.js]`(await・複数行可、最後の式の値が返る)— 対象は CSS セレクタ、`--ref e12`(snapshot の ref)、`--frame <sel>`(iframe 内)で指定 |
 | ダイアログ | `kb dialog [show]` / `kb dialog accept [text]` / `kb dialog dismiss` / `kb dialog policy [hold\|accept\|dismiss]`(`alert`/`confirm`/`prompt` を保留してから応答。既定 `hold`) |
-| HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file] [--no-follow \| --follow-verbose]`(ページ非依存。Cookie・プロキシはブラウザと共有) |
+| HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file] [--no-follow \| --follow-verbose] [--via-browser [-t id]]`(既定はページ非依存。`--via-browser` は Verify 済みタブ内の同一 origin fetch) |
 | ログイン | `kb login [url] [--until <glob>] [--save <file>]`(手動サインイン → 状態はプロファイルに自動保存) |
 | アカウント作成 | `kb signup bootstrap <name> <url> [--check-url <url>] [--expect-selector <sel>] [--expect-cookie <name>]` / `adopt <name> [--restore-proxy]` / `status [name]` / `checkpoint <name>`(通常 Chrome で登録後、同じ専用 profile を kb へ引き継ぐ) |
 | Cookie / セッション | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump` / `kb storage restore <file> [--replace]` / `kb session check <url> [--expect-selector <sel>]` |
@@ -84,7 +84,7 @@ kb daemon stop             # ブラウザごと終了
 | 操作記録 | `kb log [list]` / `kb log start [--name n] [--shots] / stop / status` / `kb log show/steps [--no-mask]` / `kb log export [-o dir]` / `kb log replay [n] [--dry-run]` / `kb log rm <n>` |
 | DOM | `kb dom query <sel> [--html] [--attr name] [--frame <sel>]`(属性がなければ value/checked 等の同名プロパティにフォールバック) |
 | プロキシ | `kb proxy add/rm/list/use/off/status/test` / `kb proxy rule add/rm/list` |
-| モード / プロファイル | `kb mode headed\|headless` / `kb profile list/use <n>`(タブ・Cookie は復元) |
+| モード / プロファイル | `kb mode headed\|headless` / `kb profile list/use <n>`(タブ URL は復元、Cookie は各 profile に保持) |
 | 認証 | `kb auth set <user> <pass>` / `kb auth clear`(対象サイトの Basic 認証) |
 | 待機 | `kb wait [--url <glob>] [--selector <sel>] [--idle] [--any]`(複数条件は既定 AND、`--any` で OR) |
 | エミュレーション | `kb emulate ua/viewport/tz/geo/net/reset`(net: offline/slow3g/fast3g) |
@@ -161,15 +161,19 @@ kb daemon start --detach-key "Ctrl+Shift+O"   # 好きなコンボに。"off" �
 
 ## ボットチェックを通す
 
-通常の kb 操作では `--disable-blink-features=AutomationControlled` で `navigator.webdriver` を隠し、実 Chrome/Edge があればそれを使います。これで「ボットに見える」よくあるチェック(Cloudflare Bot Fight Mode・軽い JS チャレンジ)は通りやすくなります。ボット挙動そのものを試したいときは `--no-stealth`。
+通常の kb 操作では `--disable-blink-features=AutomationControlled` で `navigator.webdriver` を隠し、実 Chrome/Edge があればそれを使います。ただし Cloudflare は production challenge を Playwright 等の自動ブラウザで解くことを[サポートしていません](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/)。kb も自動突破を保証せず、許可された対象で人が Verify する経路と、通過後のセッション整合性を保つことに限定します。
 
-client 側で **潰せない**もの: TLS/JA3・HTTP-2 フィンガープリント、IP レピュテーション、CDP の `Runtime.enable` リーク、そして対話型の **Cloudflare Turnstile / Managed Challenge**。これらは 1 回だけ人手で解いて通過 Cookie(`cf_clearance`)をプロファイルに永続化するのが確実です:
+Verify 前後では **同じ headed 実 Chrome・profile・UA・proxy/IP** を維持してください。UA の途中変更、VPN/proxy の切替、拡張機能は Cloudflare 公式にも[challenge loop の要因](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)として挙げられています。`kb session check` は実効 UA と UA Client Hints の major 不一致、custom UA、使用中 proxy、`cf_clearance` の存在と期限を値を出さずに診断します。`cf_clearance` は継続的に再評価されるため、Cookie があるだけで将来の通過を保証するものではありません。
 
 ```bash
 kb login example.com --until-gone "iframe[src*='challenges.cloudflare.com']"   # チャレンジを解く → 記憶される
+kb session check https://example.com/account                                  # UA/UA-CH・proxy・challenge を診断
+kb request https://example.com/api/me --via-browser                           # Verify 済みタブと同じ経路で送信
 # または自分で起動した実 Chrome にアタッチ:
 kb daemon start --cdp http://127.0.0.1:9222
 ```
+
+`--via-browser` は active tab と同一 origin の URL だけを、そのページ内の `fetch(..., {credentials:'include'})` で送ります。Cookie だけを共有する通常の `kb request` と違い、ブラウザの TLS・UA・Origin・継続セッションをそのまま使います。CORS / CSP / Fetch の制約は迂回せず、`Cookie` / `User-Agent` / `Origin` 等のブラウザ管理ヘッダは手動指定できません。`--no-follow` / `--follow-verbose` とは併用できず、Fetch API が `Set-Cookie` を公開しないため値は表示しません（Cookie jar への反映はブラウザが行います）。
 
 ただし、**アカウント作成そのものが Cloudflare 等に阻まれる対象**では、`kb login` を始めた時点ですでに Playwright/CDP 配下です。この場合は signup 引き継ぎフローを使います:
 
@@ -233,7 +237,7 @@ kb daemon stop             # 切断のみ。対象ブラウザは閉じない
 制約:
 
 - **Chrome 136 以降、普段使いの既定プロファイルではリモートデバッグが無効化されています**(セキュリティ変更)。上の例のように専用の `--user-data-dir` を指定して起動し、そこで必要なサービスにサインインしておいてください。一度サインインすればそのプロファイルに残ります。
-- アタッチ先の起動条件は変更できないため、`kb mode` / `kb profile` / `kb auth` と、kb のプロキシプロファイル切替はアタッチ中は使えません(エラーになります)。
+- アタッチ先の起動条件は変更できないため、`kb mode` / `kb profile` / `kb auth` はアタッチ中に使えません。proxy profile と relay rule の保存・切替はできますが、起動済みのアタッチ先ブラウザの通信経路には反映されません。
 - open / click / snapshot / eval / screenshot / net log / net body / cookies / storage などの操作系・観測系はすべて使えます。
 
 ## Chrome 拡張機能
@@ -286,16 +290,26 @@ kb request api.example.com/v2/me -H "Accept: application/vnd.api+json" -H "X-Api
 
 `-H` で明示したヘッダが常に優先されます(JSON 自動付与は Content-Type 未指定のときだけ)。
 
-ページを開く必要はなく、**Cookie とプロキシ設定はブラウザと共有**されます — ブラウザでログイン済みなら認証付き API もそのまま呼べ、レスポンスの Set-Cookie もブラウザに反映されます。バイナリは `-o <file>` で保存できます。
+既定モードはページを開かない `context.request` で、**Cookie jar とプロキシ設定をブラウザと共有**します。通常の認証 API、任意 origin、redirect 調査に向き、レスポンスの Set-Cookie もブラウザに反映されます。バイナリは `-o <file>` で保存できます。
 
-レスポンスの **Set-Cookie は既定で個別行表示**され(複数個でも 1 行に潰れず parse できます)、`-i` で全レスポンスヘッダも表示できます(MCP は `includeHeaders`)。`--json` では `result.setCookies` に個別の Set-Cookie 値が配列で入ります(`kb log export` のバンドルでは機微ヘッダ同様マスクされます)。
+Cloudflare 等で Verify 済みページと同じ通信経路が必要なら、対象 origin をタブで開いたまま `--via-browser` を使います:
+
+```bash
+kb open https://app.example.com/account
+kb request https://app.example.com/api/me --via-browser          # active tab を使用
+kb request https://app.example.com/api/me --via-browser -t 3     # タブを明示
+```
+
+このモードは同一 origin 限定で、通常の CSP / CORS / Fetch 制約を受けます。`Cookie` / `User-Agent` / `Origin` / `Sec-*` 等はブラウザが付けるため `-H` で上書きできません。
+
+通常モードではレスポンスの **Set-Cookie を既定で個別行表示**し(複数個でも 1 行に潰れず parse できます)、`-i` で全レスポンスヘッダも表示できます(MCP は `includeHeaders`)。`--json` では `result.setCookies` に配列で入ります。`--via-browser` では Fetch API の制約により Set-Cookie 値は読めませんが、ブラウザの Cookie jar には反映されます。
 
 ```bash
 kb request localhost:3000/api/login -X POST -d '{"user":"a"}'   # Set-Cookie: sid=… が本文の前に表示される
 kb request localhost:3000/api/me -i                              # 全レスポンスヘッダ + 個別 Set-Cookie
 ```
 
-リダイレクトは既定で追従します。`--no-follow` で 3xx の時点で止め、**`--follow-verbose`** で追従しつつ各ホップの status / `Location` / `Set-Cookie` を表示します(リダイレクト先の確認や、途中で撒かれる Cookie の分析に。メソッド処理はブラウザ準拠で 303 と 301/302 の POST は GET 化、307/308 は維持)。`--json` では中間ホップが `result.hops` に入ります。
+通常モードのリダイレクトは既定で追従します。`--no-follow` で 3xx の時点で止め、**`--follow-verbose`** で追従しつつ各ホップの status / `Location` / `Set-Cookie` を表示します(リダイレクト先の確認や、途中で撒かれる Cookie の分析に。メソッド処理はブラウザ準拠で 303 と 301/302 の POST は GET 化、307/308 は維持)。`--json` では中間ホップが `result.hops` に入ります。`--via-browser` はブラウザが redirect chain の中間ヘッダを公開しないため、これら 2 オプションと併用できません。
 
 ```bash
 kb request example.com/login --follow-verbose      # 302 → 301 → 200。各ホップの Set-Cookie も表示
@@ -304,7 +318,7 @@ kb request example.com/old-path --no-follow         # 最終遷移先でなく 3
 
 ## 操作記録と共有バンドル
 
-デーモンは**既定で操作を常時記録**します(コマンド・xhr/fetch/document の通信・コンソール出力)。作業後に 1 コマンドで、**kb を持たない第三者がそのまま読んで追試できる**自己完結バンドルを生成できます:
+デーモンは**既定で操作を常時記録**します(コマンド・xhr/fetch/document の通信・コンソール出力)。作業後に 1 コマンドで、第三者がレビューし再実行に使える自己完結バンドルを生成できます。観測通信は best-effort の curl として残りますが、browser 経路は Cookie / UA / Origin / TLS を curl で忠実に再現できないため、command event を同じ kb コマンドとしても保存します:
 
 ```bash
 kb log export                 # ./kb-log-<session>/ を生成
@@ -316,7 +330,7 @@ kb-log-<session>/
 ├─ report.md      # 連番ステップ + 各ステップの通信/コンソール + スクショ(まずこれを読む)
 ├─ steps.md       # 再現手順(kb コマンド列)
 ├─ events.jsonl   # マスク済みジャーナル(機械可読)
-├─ requests/      # 各通信を curl 単体で再実行できる .sh
+├─ requests/      # 通常通信は curl、browser 経路は同じ kb コマンドで再実行する .sh
 ├─ shots/         # スクリーンショット
 └─ meta.json      # セッション情報
 ```
@@ -377,7 +391,7 @@ claude mcp add kb -- kb-mcp
 
 `kb_snapshot` `kb_open` `kb_text` `kb_translate`(ページ翻訳)`kb_screenshot`(画像で返る)`kb_click` `kb_fill` `kb_select` `kb_eval` `kb_dialog`(alert/confirm/prompt への応答)`kb_tabs_detach`(タブを別ウィンドウへ)`kb_request` `kb_net_log` `kb_net_body` `kb_net_headers` `kb_proxy_use` など 34 ツールを公開。
 
-**Bash 経由**でも全機能を使えます(全コマンド `--json` 対応、成功 `{ok:true,result}` / 失敗 `{ok:false,error}` の対称形)。推奨ループ:
+**Bash 経由**でも全機能を使えます(action 実行後は全コマンド `--json` 対応、成功 `{ok:true,result}` / 失敗 `{ok:false,error}` の対称形。必須引数不足など action 前の構文エラーは stderr のテキスト + exit 1)。推奨ループ:
 
 ```bash
 kb open example.com --wait idle   # SPA は idle 待ち
@@ -406,7 +420,7 @@ kb は**認可された**セキュリティテスト・バグバウンティの�
 - **通信の監視・改変** — `kb net log / body / headers` で捕捉済みのリクエスト/レスポンスを読み、`kb net mock / block` でその場で書き換えてエラーハンドリングやクライアント側の信頼を検証。
 - **プロキシチェーン** — kb の上流を Burp や Caido に向け、全トラフィックを傍受プロキシ経由に(無再起動で切替可)。
 - **実サインイン済みセッションへのアタッチ** — `--cdp` で手動サインイン(SSO / 2FA / passkey)済みの Chrome を再利用でき、real-auth な対象も再ログインなしで扱える。
-- **再現可能な証跡** — `kb log export` が**機微値マスク済み**のバンドル(レポート + 手順 + curl 単体 + スクショ)を生成し、報告にそのまま添付できる。
+- **再現可能な証跡** — `kb log export` が**機微値マスク済み**のバンドル(レポート + 手順 + request script + スクショ)を生成。browser 経路の再実行は kb を使って browser 状態を維持する。
 - **エージェント駆動・headless** — サブエージェントが常駐デーモンに対して並列で recon を回せる。
 
 > **認可された対象のみをテストしてください。** 各プログラムの rules of engagement に従うこと — 多くのバグバウンティは自動スキャン・過剰なリクエストレート・anti-bot / WAF の回避を禁止しています。kb は駆動系であって許可ではありません。scope とポリシーを先に確認してください。

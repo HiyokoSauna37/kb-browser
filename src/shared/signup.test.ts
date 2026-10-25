@@ -13,6 +13,7 @@ import {
   validateExpectedSelector,
   validateProfileName,
   validateSignupName,
+  type SignupSessionCheck,
   type SignupState,
 } from './signup';
 
@@ -167,13 +168,16 @@ test('classifyAdoption は challenge・login redirect・非 ok を成功扱い�
 
 test('classifyAdoption は指定した selector / Cookie の存在を成功条件に加える', () => {
   const expected = 'https://example.com/account';
-  const base = { verdict: 'ok', probes: [{ label: 'target', finalUrl: expected, challenged: false, selectorMatched: true }] };
+  const base: SignupSessionCheck = {
+    verdict: 'ok',
+    probes: [{ label: 'target', finalUrl: expected, challenged: false, selectorMatched: true }],
+  };
   assert.equal(
     classifyAdoption(base, expected, { selector: '#account', cookie: 'sid', cookieNames: ['sid'] }),
     'adopted',
   );
   assert.equal(
-    classifyAdoption({ ...base, probes: [{ ...base.probes[0], selectorMatched: false }] }, expected, { selector: '#account' }),
+    classifyAdoption({ ...base, probes: [{ ...base.probes![0], selectorMatched: false }] }, expected, { selector: '#account' }),
     'degraded-after-adopt',
   );
   assert.equal(classifyAdoption(base, expected, { cookie: 'sid', cookieNames: ['other'] }), 'degraded-after-adopt');

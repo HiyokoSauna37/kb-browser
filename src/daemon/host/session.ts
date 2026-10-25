@@ -1,7 +1,19 @@
 import crypto from 'node:crypto';
 import type { BrowserContext, Page, Response } from 'playwright';
-import { detectChallenge, judgeSession, type ProbeOutcome, type SessionVerdict } from '../../shared/challenge';
+import {
+  detectChallenge,
+  judgeSession,
+  type ChallengeVendor,
+  type ProbeOutcome,
+  type SessionVerdict,
+} from '../../shared/challenge';
 import { readCookieSeen, writeCookieSeen, type CookieSeenStore } from '../../shared/paths';
+import type { SignupSessionCheck, SignupSessionProbe } from '../../shared/signup';
+import {
+  diagnoseBrowserIdentity,
+  type BrowserIdentityDiagnostic,
+  type BrowserUserAgentData,
+} from '../../shared/browserIdentity';
 
 /**
  * `kb session check` の実装。
@@ -20,7 +32,7 @@ const SETTLE_POLL_MS = 500;
 /** cookie-seen ストアの保持件数。 */
 const SEEN_MAX = 1_000;
 
-export interface SessionProbe {
+export interface SessionProbe extends SignupSessionProbe {
   label: 'root' | 'target' | 'api';
   url: string;
   /** リダイレクト後に実際に表示された URL。ログイン画面へ戻された等の判定材料。 */
@@ -33,7 +45,7 @@ export interface SessionProbe {
   via: 'navigate' | 'fetch';
   status?: number;
   challenged: boolean;
-  vendor?: string;
+  vendor?: ChallengeVendor;
   /** チャレンジと判定した根拠。 */
   marker?: string;
   title?: string;
@@ -54,13 +66,14 @@ export interface SessionCookieInfo {
   secure: boolean;
 }
 
-export interface SessionCheckResult {
+export interface SessionCheckResult extends SignupSessionCheck {
   host: string;
   probes: SessionProbe[];
   cookies: SessionCookieInfo[];
   cookieCount: number;
   verdict: SessionVerdict;
   hint: string;
+  identity: BrowserIdentityDiagnostic;
 }
 
 /** セッション性を持つ(= 劣化診断に効く)Cookie 名。値は決して出力しない。 */
@@ -246,13 +259,48 @@ async function fetchProbe(page: Page, url: string, timeout: number): Promise<Ses
  */
 export async function checkSession(
   context: BrowserContext,
-  opts: { url: string; apiUrl?: string; expectSelector?: string; timeoutMs: number; profile: string },
+  opts: {
+    url: string;
+    apiUrl?: string;
+    expectSelector?: string;
+    timeoutMs: number;
+    profile: string;
+    configuredUserAgent?: string;
+  },
 ): Promise<SessionCheckResult> {
   const target = new URL(opts.url);
   const rootUrl = `${target.origin}/`;
   const page = await context.newPage();
   const probes: SessionProbe[] = [];
+  let identity = diagnoseBrowserIdentity({ userAgent: '' }, opts.configuredUserAgent);
   try {
+    // 診断情報の取得失敗だけで session check 本体を止めない。about:blank 上で読むため
+    // target の script による navigator 上書きには影響されず、実際の起動 identity を測れる。
+    const effectiveIdentity = await page
+      .evaluate(() => {
+        const nav = navigator as Navigator & {
+          userAgentData?: {
+            brands?: { brand: string; version: string }[];
+            mobile?: boolean;
+            platform?: string;
+          };
+        };
+        const data = nav.userAgentData;
+        const userAgentData: BrowserUserAgentData | undefined = data
+          ? {
+              brands: Array.isArray(data.brands)
+                ? data.brands.map(({ brand, version }) => ({ brand, version }))
+                : [],
+              mobile: data.mobile,
+              platform: data.platform,
+            }
+          : undefined;
+        return { userAgent: nav.userAgent, ...(userAgentData ? { userAgentData } : {}) };
+      })
+      .catch(() => undefined);
+    if (effectiveIdentity) {
+      identity = diagnoseBrowserIdentity(effectiveIdentity, opts.configuredUserAgent);
+    }
     probes.push(await navigateProbe(page, 'root', rootUrl, opts.timeoutMs));
     probes.push(await navigateProbe(page, 'target', opts.url, opts.timeoutMs, opts.expectSelector));
     if (opts.apiUrl) {
@@ -293,5 +341,5 @@ export async function checkSession(
     verdict = 'expectation-failed';
     hint = `対象の HTTP 応答は正常ですが、期待したログイン済み要素 (${opts.expectSelector}) が visible ではありません。ログイン画面・権限不足・SPA の描画失敗を確認してください。`;
   }
-  return { host: target.hostname, probes, cookies, cookieCount: jar.length, verdict, hint };
+  return { host: target.hostname, probes, cookies, cookieCount: jar.length, verdict, hint, identity };
 }

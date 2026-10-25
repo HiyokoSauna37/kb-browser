@@ -79,7 +79,9 @@ export async function launchOwned(opts: HostOptions): Promise<LaunchResult> {
 export async function attachOverCdp(cdpUrl: string): Promise<LaunchResult> {
   let browser: Browser;
   try {
-    browser = await chromium.connectOverCDP(cdpUrl, { timeout: 15_000 });
+    // 人が challenge を通過した既存ブラウザの focus / media / download 等の context 既定値を
+    // Playwright 側で上書きせず、同じ browser process の状態を極力そのまま使う。
+    browser = await chromium.connectOverCDP(cdpUrl, { timeout: 15_000, noDefaults: true });
   } catch (err) {
     throw new Error(
       `CDP エンドポイント ${cdpUrl} に接続できません。対象ブラウザを --remote-debugging-port 付きで起動してください` +

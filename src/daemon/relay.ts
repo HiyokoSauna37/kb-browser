@@ -17,6 +17,9 @@ const CONNECT_TIMEOUT_MS = 10_000;
  */
 export class RelayProxy {
   private server = http.createServer();
+  /** stop 時に CONNECT / keep-alive を確実に閉じるため、relay が所有する全 socket を追跡する。 */
+  private sockets = new Set<net.Socket>();
+  private stopping = false;
   private upstreamName = 'direct';
   private upstream: ProxyProfile = DIRECT;
   private rules: { pattern: string; name: string; profile: ProxyProfile }[] = [];
@@ -70,6 +73,7 @@ export class RelayProxy {
   }
 
   async start(): Promise<number> {
+    this.server.on('connection', (socket) => this.trackSocket(socket));
     this.server.on('connect', (req, clientSocket, head) => {
       // ブラウザ側の切断(407 後のリセット等)で unhandled 'error' にならないよう先に握っておく
       (clientSocket as net.Socket).on('error', () => {});
@@ -94,7 +98,24 @@ export class RelayProxy {
   }
 
   async stop(): Promise<void> {
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    // server.close() だけでは keep-alive / CONNECT tunnel が閉じるまで callback が来ない。
+    // 先に listen を止めてから所有 socket を破棄し、daemon restart/stop が無期限に待たないようにする。
+    this.stopping = true;
+    const closed = new Promise<void>((resolve) => this.server.close(() => resolve()));
+    for (const socket of this.sockets) socket.destroy();
+    await closed;
+  }
+
+  private trackSocket<T extends net.Socket>(socket: T): T {
+    if (this.stopping) {
+      socket.destroy();
+      return socket;
+    }
+    if (!this.sockets.has(socket)) {
+      this.sockets.add(socket);
+      socket.once('close', () => this.sockets.delete(socket));
+    }
+    return socket;
   }
 
   private authOk(req: http.IncomingMessage): boolean {
@@ -195,6 +216,7 @@ export class RelayProxy {
       res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
       upstreamRes.pipe(res);
     });
+    upstreamReq.once('socket', (socket) => this.trackSocket(socket));
     upstreamReq.setTimeout(CONNECT_TIMEOUT_MS, () => upstreamReq.destroy(new Error('upstream timeout')));
     upstreamReq.on('error', (err) => {
       this.recordError(url.hostname, this.profileNameFor(url.hostname), err);
@@ -208,7 +230,7 @@ export class RelayProxy {
 
   /** profile 経由で host:port への生 TCP ソケットを確立する。 */
   async connectVia(profile: ProxyProfile, host: string, port: number): Promise<net.Socket> {
-    return connectViaProxy(profile, host, port, CONNECT_TIMEOUT_MS);
+    return this.trackSocket(await connectViaProxy(profile, host, port, CONNECT_TIMEOUT_MS));
   }
 
   /**

@@ -1,6 +1,6 @@
 {
   "name": "kb-browser",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "CLI-operable browser built on Playwright + Chromium (CDP)",
   "license": "MIT",
   "bin": {
@@ -10,8 +10,8 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "test": "tsc && node --test \"dist/**/*.test.js\"",
-    "test:e2e": "tsc && node --test \"dist/e2e/**/*.e2e.js\"",
+    "test": "tsc && node tools/run-tests.js unit",
+    "test:e2e": "tsc && node tools/run-tests.js e2e",
     "test:all": "npm run test && npm run test:e2e",
     "kb": "node dist/cli.js"
   },
@@ -21,7 +21,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^13.1.0",
-    "playwright": "^1.53.0",
+    "playwright": "^1.61.1",
     "socks": "^2.8.9",
     "zod": "^3.24.1"
   },

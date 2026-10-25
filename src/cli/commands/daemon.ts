@@ -119,8 +119,9 @@ export function registerDaemonCommands(program: Command): void {
           return;
         }
         try {
-          // 明示起動は「フラグなし = headed / stealth off」の契約を守る(last-run を継承するのは自動 spawn のみ)。
-          // --idle-timeout は分指定なので秒に変換して渡す(未指定なら last-run 継承 → デーモン側の env/既定)。
+          // 明示起動は「フラグなし = headed / stealth on / HTTPS error 無視 off」。profile / channel /
+          // UA / idle / extensions / hotkeys は未指定なら last-run を継承する。
+          // --idle-timeout は分指定なので秒に変換して渡す。
           const idleTimeoutSec = opts.idleTimeout != null ? Math.round(opts.idleTimeout * 60) : undefined;
           const child = spawnDaemon({ headless: !!opts.headless, profile: opts.profile, channel: opts.channel, userAgent: opts.ua, stealth: opts.cdp ? false : stealth, ignoreHttpsErrors: !!opts.ignoreHttpsErrors, extensions, detachKey, translateKey, cdpUrl: opts.cdp, idleTimeoutSec });
           // child を渡すと、起動に失敗して即終了した場合に 30 秒待たずエラーになる
@@ -266,7 +267,8 @@ export function registerDaemonCommands(program: Command): void {
           const detachNote = s.detachKey ? `, detach-key=${s.detachKey}` : '';
           const transKeyNote = s.translateKey ? `, translate-key=${s.translateKey}` : '';
           const stealthNote = s.attached ? '' : s.stealth ? ', stealth=on' : ', stealth=off';
-          return `running (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}, tabs=${s.tabs}, proxy=${s.proxy}${stealthNote}${s.ignoreHttpsErrors ? ', ignore-https-errors=on' : ''}${extNote}${detachNote}${transKeyNote}${s.attached ? `, attach=${s.attached}` : ''}${idleNote}${buildNote})`;
+          const uaNote = s.userAgent ? ', ua=custom' : '';
+          return `running (pid=${s.pid}, channel=${s.channel}, headless=${s.headless}, profile=${s.profile}, tabs=${s.tabs}, proxy=${s.proxy}${stealthNote}${uaNote}${s.ignoreHttpsErrors ? ', ignore-https-errors=on' : ''}${extNote}${detachNote}${transKeyNote}${s.attached ? `, attach=${s.attached}` : ''}${idleNote}${buildNote})`;
         });
       }),
     );

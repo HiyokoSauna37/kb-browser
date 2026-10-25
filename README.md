@@ -18,27 +18,27 @@
 Everything a GUI browser gives you — page rendering, cookie management, DevTools operations (Network / Console / Elements) — is available as `kb` commands. FoxyProxy-style proxy profiles are built in, with **restart-free switching** and per-host routing rules. Designed to be driven by AI agents (Claude Code, etc.) via Bash or MCP, while the window is a real Chrome you can use by hand at any time.
 
 > **Two workflows it's built for:**
-> - **Drive it from an AI agent** — Claude Code and other agents operate kb over **MCP (34 tools)** or **Bash** (every command supports `--json`). The accessibility-snapshot + `--ref` loop is tuned for reliable, low-token automation, and the resident daemon returns each step in tens of milliseconds.
+> - **Drive it from an AI agent** — Claude Code and other agents operate kb over **MCP (34 tools)** or **Bash** (every command supports JSON action results). The accessibility-snapshot + `--ref` loop is tuned for reliable, low-token automation, and the resident daemon returns each step in tens of milliseconds.
 > - **Security research & bug-bounty recon** (authorized testing only) — session-shared HTTP, live network inspection/mocking, raw `eval` on authenticated SPAs, proxy chaining into Burp/Caido, two-account IDOR via profiles, and masked, shareable evidence bundles. See [Security research & bug-bounty recon](#security-research--bug-bounty-recon).
 
 ## Features
 
 - **Daemon architecture** — the browser stays resident; every CLI command returns in tens of milliseconds
-- **Real Chrome, presents as a normal browser** — uses your installed Chrome/Edge (DRM works), falling back to bundled Chromium; pick explicitly with `--channel` or override the User-Agent with `--ua`. **Stealth is on by default** (`navigator.webdriver` hidden, so sites like Cloudflare don't flag it as an automated browser); disable with `--no-stealth`. Hard challenges (Cloudflare Turnstile / Managed Challenge) still need the solve-once-and-persist path — see [Getting past bot checks](#getting-past-bot-checks)
+- **Uses installed Chrome/Edge** — prefers a real browser with DRM support and falls back to bundled Chromium; select with `--channel` or override the UA with `--ua`. Stealth is on by default to reduce basic `navigator.webdriver` exposure, but it does not guarantee Cloudflare production-challenge acceptance. See [Getting past bot checks](#getting-past-bot-checks) for human verification and path continuity
 - **Pop a tab into its own window** — `kb tabs detach <id...>` moves one or more tabs into a single new window (or bind a key with `--detach-key`). See [Detaching tabs](#detaching-tabs)
 - **Translate the page** — `kb translate` rewrites the page in place like Chrome's "Translate this page" (`--toggle` flips translation ⇄ original, `--text` just prints it, `--translate-key` binds a key). See [Translating a page](#translating-a-page)
 - **Attach to a running browser** — `kb daemon start --cdp http://127.0.0.1:9222` connects to a Chrome/Edge started with `--remote-debugging-port` and reuses its signed-in state
 - **Chrome extensions** — `kb daemon start --extensions <dir,...>` loads unpacked extensions (`on` enables extensions already installed in the profile, `off` turns it back off). See [Chrome extensions](#chrome-extensions)
 - **Agent-optimized** — `kb snapshot` returns an accessibility tree with element refs; `kb click --ref e12` acts on them reliably (including inside iframes), and stale refs are **auto re-resolved** to the element with the same role/name after re-renders. Long outputs (text / html / snapshot) are capped at 20,000 chars by default with `--offset` paging. `kb eval` accepts `await` and multi-line code as-is
 - **DevTools from the terminal** — network log / response bodies (`kb net body`) / full headers (`kb net headers`) / request blocking / response mocking (including overriding live endpoints with error responses) / HAR recording / console / DOM inspection
-- **Mini REST client** — `kb request` hits APIs directly without opening a page; cookies and proxy settings are shared with the browser (call authenticated APIs as-is)
+- **Two HTTP paths** — `kb request` is page-independent; `--via-browser` runs a same-origin fetch inside a verified tab, keeping its Cookie, TLS, UA, and Origin path
 - **Proxy profiles** — save `host:port` (+auth) as named profiles, switch instantly without restarting the browser, route specific hosts through specific proxies (FoxyProxy-style rules), SOCKS5 auth handled by the built-in relay (the relay itself is token-protected)
-- **Headed ⇄ headless / profile switching** — tabs and cookies survive
+- **Headed ⇄ headless / profile switching** — tab URLs are restored; cookies remain isolated and persistent in each profile
 - **Persistent sign-in** — log in once and the state is kept in the profile across sessions; `kb login` wraps the manual sign-in flow in one command, `kb storage dump / restore` exports it to a file
-- **Operation recording** — commands, network, and console are journaled by default; `kb log export` produces a self-contained bundle (report + reproduction steps + standalone curl + screenshots) with sensitive values masked by default
+- **Operation recording** — commands, network, and console are journaled by default; `kb log export` produces a review/replay bundle (report + steps + request scripts + screenshots) with sensitive values masked by default
 - **Human-in-the-loop** — the agent automates, you take over for logins/CAPTCHAs, `kb wait` detects when you're done
 - **MCP server** — `kb-mcp` exposes 34 tools (screenshots are returned as images)
-- **`--json` everywhere** — machine-readable output for scripting and agents
+- **JSON action results everywhere** — machine-readable output for scripting and agents
 
 ## Install
 
@@ -74,7 +74,7 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 | Navigation | `kb back` / `kb forward` / `kb reload` / `kb scroll [--to <sel>/--bottom]` |
 | Interaction | `kb click` / `kb fill` / `kb select [--label]` / `kb check` / `kb uncheck` / `kb hover` / `kb upload <sel> <local file path...>` / `kb press <key>` / `kb eval <js> [--file f.js]` (`await` & multi-line OK; returns the last expression) — target via CSS selector, `--ref e12` (from snapshot), or `--frame <sel>` (inside iframe) |
 | Dialogs | `kb dialog [show]` / `kb dialog accept [text]` / `kb dialog dismiss` / `kb dialog policy [hold\|accept\|dismiss]` (hold `alert`/`confirm`/`prompt`, then respond; default `hold`) |
-| HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file] [--no-follow \| --follow-verbose]` (page-independent; shares cookies & proxy with the browser) |
+| HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file] [--no-follow \| --follow-verbose] [--via-browser [-t id]]` (page-independent by default; `--via-browser` uses a verified same-origin tab) |
 | Login | `kb login [url] [--until <glob>] [--save <file>]` (manual sign-in → state auto-saved to the profile) |
 | Account signup | `kb signup bootstrap <name> <url> [--check-url <url>] [--expect-selector <sel>] [--expect-cookie <name>]` / `adopt <name> [--restore-proxy]` / `status [name]` / `checkpoint <name>` (sign up in ordinary Chrome, then adopt the same dedicated profile into kb) |
 | Cookies / session | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump` / `kb storage restore <file> [--replace]` / `kb session check <url> [--expect-selector <sel>]` |
@@ -84,12 +84,12 @@ Headed (visible window) by default. Cookies and login state persist under `~/.kb
 | Recording | `kb log [list]` / `kb log start [--name n] [--shots] / stop / status` / `kb log show/steps [--no-mask]` / `kb log export [-o dir]` / `kb log replay [n] [--dry-run]` / `kb log rm <n>` |
 | DOM | `kb dom query <sel> [--html] [--attr name] [--frame <sel>]` (falls back to same-name DOM property — value / checked etc. — when the attribute is absent) |
 | Proxy | `kb proxy add/rm/list/use/off/status/test` / `kb proxy rule add/rm/list` |
-| Mode / profile | `kb mode headed\|headless` / `kb profile list/use <n>` (tabs & cookies restored) |
+| Mode / profile | `kb mode headed\|headless` / `kb profile list/use <n>` (tab URLs are restored; cookies stay with each profile) |
 | Auth | `kb auth set <user> <pass>` / `kb auth clear` (HTTP Basic auth for target sites) |
 | Waiting | `kb wait [--url <glob>] [--selector <sel>] [--idle] [--any]` (multiple conditions AND by default, `--any` for OR) |
 | Emulation | `kb emulate ua/viewport/tz/geo/net/reset` (net: offline/slow3g/fast3g) |
 
-All commands support `--json`. Long outputs are truncated at 20,000 chars by default; use `--offset <n>` for the next chunk or `--max-chars 0` for everything.
+All command actions support `--json`; pre-action syntax errors remain text on stderr. Long outputs are truncated at 20,000 chars by default; use `--offset <n>` for the next chunk or `--max-chars 0` for everything.
 
 ## JS dialogs (alert / confirm / prompt)
 
@@ -161,15 +161,19 @@ kb daemon start --detach-key "Ctrl+Shift+O"   # pick your own; "off" to disable
 
 ## Getting past bot checks
 
-For normal kb operation, `navigator.webdriver` is hidden via `--disable-blink-features=AutomationControlled`, using your installed Chrome/Edge when available. That helps with common "you look like a bot" checks (Cloudflare Bot Fight Mode, basic JS challenges). Disable it with `--no-stealth` if you specifically want to test bot handling.
+For normal kb operation, `navigator.webdriver` is hidden via `--disable-blink-features=AutomationControlled`, using your installed Chrome/Edge when available. Cloudflare, however, [does not support solving production challenges in automated browsers](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/). kb does not promise automated bypass; it supports human verification on authorized targets and keeps the post-verification session coherent.
 
-What kb **can't** win from the client side: TLS/JA3 & HTTP-2 fingerprints, IP reputation, the CDP `Runtime.enable` leak, and interactive **Cloudflare Turnstile / Managed Challenge** CAPTCHAs. For those, solve it once by hand and let the pass cookie (`cf_clearance`) persist in the profile:
+Keep the **same headed real Chrome, profile, UA, and proxy/IP** before and after Verify. Cloudflare lists mid-flow UA changes, VPN/proxy changes, and extensions among common [challenge-loop causes](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/). `kb session check` diagnoses effective UA versus UA Client Hints, custom-UA mismatches, the active proxy, and `cf_clearance` presence/expiry without exposing its value. A clearance cookie can still be re-evaluated; possession alone is not a future-pass guarantee.
 
 ```bash
 kb login example.com --until-gone "iframe[src*='challenges.cloudflare.com']"   # solve the challenge → it's remembered
+kb session check https://example.com/account                                  # diagnose UA/UA-CH, proxy, and challenge
+kb request https://example.com/api/me --via-browser                           # use the verified tab's browser path
 # or attach to a real Chrome you drive yourself:
 kb daemon start --cdp http://127.0.0.1:9222
 ```
+
+`--via-browser` sends only to the active tab's origin, using that page's `fetch(..., {credentials:'include'})`. Unlike the default `kb request`, which shares the cookie jar but uses a page-independent HTTP stack, this keeps the browser's TLS, UA, Origin, and continuing session path. It does not bypass CSP, CORS, or Fetch restrictions; browser-managed headers such as `Cookie`, `User-Agent`, and `Origin` cannot be supplied manually. It is incompatible with `--no-follow` / `--follow-verbose`, and Fetch does not expose `Set-Cookie` values (the browser still applies them to its cookie jar).
 
 When **account creation itself is blocked** by Cloudflare or a similar service, `kb login` may be too late: the browser is already under Playwright/CDP control. Use the signup handoff flow instead:
 
@@ -233,7 +237,7 @@ kb daemon stop             # disconnects only; the target browser stays open
 Constraints:
 
 - **Chrome 136+ disables remote debugging on the everyday default profile** (a security change). Start with a dedicated `--user-data-dir` as shown above and sign in to your services there once — the state sticks to that profile.
-- Since kb can't change how the target browser was launched, `kb mode` / `kb profile` / `kb auth` and kb's proxy-profile switching are unavailable while attached (they return a clear error).
+- Since kb can't change how the target browser was launched, `kb mode` / `kb profile` / `kb auth` are unavailable while attached. Proxy profiles and relay rules can still be saved or switched, but they do not change the already-running attached browser's network path.
 - Everything else — open / click / snapshot / eval / screenshot / net log / net body / cookies / storage — works.
 
 ## Chrome extensions
@@ -286,16 +290,26 @@ kb request api.example.com/v2/me -H "Accept: application/vnd.api+json" -H "X-Api
 
 Explicit `-H` headers always win (JSON auto-detection only kicks in when Content-Type is unset).
 
-No page needed, and **cookies & proxy settings are shared with the browser** — if you're logged in in the browser, authenticated APIs just work, and `Set-Cookie` responses flow back into the browser. Save binary responses with `-o <file>`.
+The default page-independent `context.request` path **shares the browser cookie jar and proxy settings**. It is suited to ordinary authenticated APIs, arbitrary origins, and redirect inspection; `Set-Cookie` responses flow back into the browser. Save binary responses with `-o <file>`.
 
-Response **`Set-Cookie` headers are shown by default, one per line** (multiple cookies stay parseable instead of being folded into a single line), and `-i` prints all response headers (MCP: `includeHeaders`). With `--json`, `result.setCookies` holds the individual `Set-Cookie` values as an array (masked like other sensitive headers in `kb log export` bundles).
+When a Cloudflare-protected endpoint needs the exact path of a verified page, keep that origin open and use `--via-browser`:
+
+```bash
+kb open https://app.example.com/account
+kb request https://app.example.com/api/me --via-browser          # active tab
+kb request https://app.example.com/api/me --via-browser -t 3     # explicit tab
+```
+
+This mode is same-origin only and remains subject to CSP, CORS, and Fetch restrictions. The browser supplies `Cookie`, `User-Agent`, `Origin`, `Sec-*`, and similar managed headers, so `-H` cannot override them.
+
+In the default mode, response **`Set-Cookie` headers are shown one per line** (multiple cookies stay parseable instead of being folded together), and `-i` prints all response headers (MCP: `includeHeaders`). With `--json`, `result.setCookies` holds them as an array. Fetch does not expose `Set-Cookie` values in `--via-browser` mode, though the browser still applies them to its cookie jar.
 
 ```bash
 kb request localhost:3000/api/login -X POST -d '{"user":"a"}'   # Set-Cookie: sid=… is shown above the body
 kb request localhost:3000/api/me -i                              # all response headers + individual Set-Cookie
 ```
 
-Redirects are followed by default. Use `--no-follow` to stop at the 3xx, or **`--follow-verbose`** to follow while printing every hop's status / `Location` / `Set-Cookie` — useful for seeing where a chain lands and which cookies get set mid-redirect (method handling matches browsers: 303 and POST-on-301/302 become GET; 307/308 preserve). With `--json`, the intermediate hops are in `result.hops`.
+The default mode follows redirects. Use `--no-follow` to stop at the 3xx, or **`--follow-verbose`** to print every hop's status / `Location` / `Set-Cookie` (303 and POST-on-301/302 become GET; 307/308 preserve). With `--json`, intermediate hops are in `result.hops`. `--via-browser` cannot combine with either option because browser fetch does not expose redirect-chain headers.
 
 ```bash
 kb request example.com/login --follow-verbose      # 302 → 301 → 200, each hop with its Set-Cookie
@@ -304,7 +318,7 @@ kb request example.com/old-path --no-follow         # show the 3xx itself instea
 
 ## Operation recording & shareable bundles
 
-The daemon **records operations by default** (commands, xhr/fetch/document traffic, console output). After a work session, one command produces a self-contained bundle that **someone without kb can read and reproduce**:
+The daemon **records operations by default** (commands, xhr/fetch/document traffic, console output). After a work session, one command produces a self-contained bundle that another person can review and use for replay. Observed traffic is exported as best-effort curl; browser-routed commands retain a kb replay command because curl cannot reproduce browser-managed Cookie, UA, Origin, and TLS state:
 
 ```bash
 kb log export                 # generates ./kb-log-<session>/
@@ -316,7 +330,7 @@ kb-log-<session>/
 ├─ report.md      # numbered steps + per-step network/console + screenshots (start here)
 ├─ steps.md       # reproduction steps (kb command list)
 ├─ events.jsonl   # masked journal (machine-readable)
-├─ requests/      # each request as a standalone curl .sh
+├─ requests/      # curl for normal traffic; the same kb command for browser-routed requests
 ├─ shots/         # screenshots
 └─ meta.json      # session info
 ```
@@ -377,7 +391,7 @@ claude mcp add kb -- kb-mcp
 
 Exposes `kb_snapshot`, `kb_open`, `kb_text`, `kb_translate` (translate the page), `kb_screenshot` (returns an image), `kb_click`, `kb_fill`, `kb_select`, `kb_eval`, `kb_dialog` (respond to alert/confirm/prompt), `kb_tabs_detach` (pop tabs into a new window), `kb_request`, `kb_net_log`, `kb_net_body`, `kb_net_headers`, `kb_proxy_use`, and more — 34 tools.
 
-**Via Bash** everything is available too (every command supports `--json`, with symmetric `{ok:true,result}` / `{ok:false,error}`). The recommended loop:
+**Via Bash** everything is available too (after an action starts, commands support `--json` with symmetric `{ok:true,result}` / `{ok:false,error}`; pre-action syntax errors such as a missing required argument remain text on stderr with exit code 1). The recommended loop:
 
 ```bash
 kb open example.com --wait idle   # use idle for SPAs
@@ -406,7 +420,7 @@ kb is a capable driver for **authorized** security testing and bug-bounty reconn
 - **Traffic inspection & tampering** — `kb net log / body / headers` reads captured requests and responses; `kb net mock / block` rewrites them in place to probe error handling and client-side trust.
 - **Proxy chaining** — point kb's upstream at Burp or Caido and route all traffic through your intercepting proxy, switchable without a restart.
 - **Attach to a real signed-in session** — `--cdp` reuses a Chrome you signed into by hand (SSO / 2FA / passkey), so real-auth targets work without re-login.
-- **Reproducible evidence** — `kb log export` produces a **secret-masked** bundle (report + steps + standalone curl + screenshots) you can attach to a report.
+- **Reproducible evidence** — `kb log export` produces a **secret-masked** bundle (report + steps + request scripts + screenshots) you can attach to a report; browser-routed replay uses kb to preserve browser state.
 - **Agent-driven, headless** — sub-agents can run recon in parallel against the resident daemon.
 
 > **Test only what you're authorized to.** Follow each program's rules of engagement — many bug-bounty programs prohibit automated scanning, aggressive request rates, or evading their anti-bot / WAF controls. kb is a driver, not a licence: confirm scope and policy first.

@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import type { APIResponse, BrowserContext } from 'playwright';
+import type { APIResponse, BrowserContext, Page } from 'playwright';
 import { REQUEST_TIMEOUT_SEC, TEXT_CAP, TEXT_CONTENT_RE } from '../../shared/constants';
 import { clip, inferJsonContentType, normalizeUrl } from '../../shared/util';
 
@@ -76,6 +76,17 @@ interface RecordContext {
   data?: string;
 }
 
+interface BufferedResponse {
+  status: number;
+  statusText: string;
+  url: string;
+  headers: Record<string, string>;
+  body: Buffer;
+  ms: number;
+  setCookies?: string[];
+  hops?: RedirectHop[];
+}
+
 /** ブラウザ既定と同じ上限。ここに達したら最後のレスポンスをそのまま返す(追従を打ち切る)。 */
 const MAX_REDIRECTS = 20;
 
@@ -123,6 +134,39 @@ function stripBodyHeaders(headers?: Record<string, string>): Record<string, stri
   return out;
 }
 
+/** Buffer 化済みレスポンスから共通の HttpResult を組み立てる。 */
+function buildBufferedResult(response: BufferedResponse, opts: HttpRequestOptions): HttpResult {
+  const { body: buf, headers } = response;
+  const contentType = headers['content-type'] ?? '';
+  const base = {
+    status: response.status,
+    statusText: response.statusText,
+    url: response.url,
+    headers,
+    contentType,
+    ms: response.ms,
+    bytes: buf.length,
+    // 空配列のときは結果要約に載せない(ヘッダ系レスポンスのノイズを抑える)
+    ...(response.setCookies?.length ? { setCookies: response.setCookies } : {}),
+    ...(response.hops?.length ? { hops: response.hops } : {}),
+  };
+  if (opts.savePath) {
+    fs.writeFileSync(opts.savePath, buf);
+    return { ...base, savedTo: opts.savePath };
+  }
+  if (buf.length > 0 && contentType && !TEXT_CONTENT_RE.test(contentType)) {
+    return { ...base, binary: true };
+  }
+  const clipped = clip(buf.toString('utf8'), { maxChars: opts.maxChars ?? TEXT_CAP, offset: opts.offset });
+  return {
+    ...base,
+    body: clipped.text,
+    totalChars: clipped.totalChars,
+    offset: clipped.offset,
+    truncated: clipped.truncated,
+  };
+}
+
 /** APIResponse から HttpResult を組み立てる(本文の保存 / バイナリ判定 / 切り詰めを含む)。 */
 async function buildResult(
   res: APIResponse,
@@ -145,35 +189,21 @@ async function buildResult(
     body: buf,
     ms,
   });
-  const contentType = headers['content-type'] ?? '';
-  const base = {
-    status: res.status(),
-    statusText: res.statusText(),
-    url: res.url(),
-    headers,
-    contentType,
-    ms,
-    bytes: buf.length,
-    // 空配列のときは結果要約に載せない(ヘッダ系レスポンスのノイズを抑える)
-    ...(setCookies.length ? { setCookies } : {}),
-    ...(hops && hops.length ? { hops } : {}),
-  };
+  const result = buildBufferedResult(
+    {
+      status: res.status(),
+      statusText: res.statusText(),
+      url: res.url(),
+      headers,
+      body: buf,
+      ms,
+      setCookies,
+      hops,
+    },
+    opts,
+  );
   res.dispose().catch(() => {});
-  if (opts.savePath) {
-    fs.writeFileSync(opts.savePath, buf);
-    return { ...base, savedTo: opts.savePath };
-  }
-  if (buf.length > 0 && contentType && !TEXT_CONTENT_RE.test(contentType)) {
-    return { ...base, binary: true };
-  }
-  const clipped = clip(buf.toString('utf8'), { maxChars: opts.maxChars ?? TEXT_CAP, offset: opts.offset });
-  return {
-    ...base,
-    body: clipped.text,
-    totalChars: clipped.totalChars,
-    offset: clipped.offset,
-    truncated: clipped.truncated,
-  };
+  return result;
 }
 
 /**
@@ -272,4 +302,136 @@ export async function httpRequest(
     headers: headersToSend,
     data: opts.data,
   });
+}
+
+/**
+ * Verify 済みページと同じ Chromium の fetch 経路で HTTP リクエストを送る。
+ * Cookie / TLS / User-Agent / Origin をページと揃えるための明示モードであり、CORS を迂回する機能ではない。
+ * 応答ヘッダの Set-Cookie は Fetch API から読めないが、ブラウザの cookie jar には通常どおり反映される。
+ */
+export async function browserHttpRequest(
+  page: Page,
+  opts: HttpRequestOptions,
+  onRecord?: ExchangeRecorder,
+): Promise<HttpResult> {
+  if (opts.follow === false || opts.verbose) {
+    throw new Error('--via-browser は --no-follow / --follow-verbose と併用できません(ブラウザ fetch は redirect chain のヘッダを公開しません)');
+  }
+
+  const url = normalizeUrl(opts.url);
+  let pageOrigin: string;
+  let targetOrigin: string;
+  try {
+    pageOrigin = new URL(page.url()).origin;
+  } catch {
+    throw new Error('--via-browser を使うには、先に対象 origin のページを kb open で開いてください');
+  }
+  try {
+    targetOrigin = new URL(url).origin;
+  } catch {
+    throw new Error(`URL として解釈できません: ${opts.url}`);
+  }
+  if (pageOrigin === 'null' || pageOrigin !== targetOrigin) {
+    throw new Error(
+      `--via-browser は active tab と同一 origin の URL に限定されます (tab=${pageOrigin}, request=${targetOrigin})。` +
+        `先に kb open ${targetOrigin} を実行するか、通常の kb request を使ってください`,
+    );
+  }
+
+  const method = (opts.method ?? 'GET').toUpperCase();
+  if ((method === 'GET' || method === 'HEAD') && opts.data !== undefined) {
+    throw new Error(`--via-browser の ${method} には request body を指定できません`);
+  }
+
+  // Fetch が上書き禁止にしている browser-managed header は黙って欠落させず、先に説明可能な形で拒否する。
+  const forbidden = Object.keys(opts.headers ?? {}).filter((name) =>
+    /^(accept-charset|accept-encoding|access-control-request-headers|access-control-request-method|connection|content-length|cookie2?|date|dnt|expect|host|keep-alive|origin|permissions-policy|proxy-.*|referer|sec-.*|te|trailer|transfer-encoding|upgrade|user-agent|via)$/i.test(
+      name,
+    ),
+  );
+  if (forbidden.length) {
+    throw new Error(
+      `--via-browser ではブラウザ管理ヘッダを指定できません: ${forbidden.join(', ')}。` +
+        'Cookie / User-Agent / Origin は Verify 済みタブの値を自動で使用します',
+    );
+  }
+
+  const inferred = inferJsonContentType(opts.data, opts.headers);
+  const headersToSend = inferred ? { ...(opts.headers ?? {}), 'content-type': inferred } : opts.headers;
+  const timeout = opts.timeoutMs ?? REQUEST_TIMEOUT_SEC * 1000;
+  const started = Date.now();
+  const raw = await page.evaluate(
+    async ({ target, requestMethod, headers, data, timeoutMs }) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(target, {
+          method: requestMethod,
+          headers,
+          body: data,
+          credentials: 'include',
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((value, name) => {
+          responseHeaders[name.toLowerCase()] = value;
+        });
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        // apply/spread は大きなレスポンスで call stack を超えるため、小さい chunk ごとに base64 化する。
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+        return {
+          status: response.status,
+          statusText: response.statusText,
+          url: response.url,
+          headers: responseHeaders,
+          bodyBase64: btoa(binary),
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(controller.signal.aborted ? `browser fetch timeout (${timeoutMs}ms)` : `browser fetch failed: ${message}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    {
+      target: url,
+      requestMethod: method,
+      headers: headersToSend,
+      data: opts.data,
+      timeoutMs: timeout,
+    },
+  );
+  const ms = Date.now() - started;
+  const body = Buffer.from(raw.bodyBase64, 'base64');
+  // Fetch API は Set-Cookie を公開しない契約だが、ページ側の monkey patch 等があっても
+  // Cookie 値を CLI / journal へ流さないよう Node 側でも防御する。
+  delete raw.headers['set-cookie'];
+  delete raw.headers['set-cookie2'];
+  onRecord?.({
+    method,
+    url: raw.url,
+    status: raw.status,
+    statusText: raw.statusText,
+    requestHeaders: headersToSend,
+    postData: opts.data,
+    responseHeaders: raw.headers,
+    body,
+    ms,
+  });
+  return buildBufferedResult(
+    {
+      status: raw.status,
+      statusText: raw.statusText,
+      url: raw.url,
+      headers: raw.headers,
+      body,
+      ms,
+    },
+    opts,
+  );
 }

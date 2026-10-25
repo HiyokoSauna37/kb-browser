@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
-import type net from 'node:net';
-import { matchHost, readConnectResponse, splitHostPort } from './relay';
+import net from 'node:net';
+import { once } from 'node:events';
+import { matchHost, readConnectResponse, RelayProxy, splitHostPort } from './relay';
 
 test('matchHost: 完全一致とワイルドカード', () => {
   assert.equal(matchHost('*', 'anything.example.com'), true);
@@ -42,6 +43,25 @@ function mockSocket(): PassThrough & { destroyed: boolean } {
   const s = new PassThrough() as PassThrough & { destroyed: boolean };
   return s;
 }
+
+test('RelayProxy.stop: 開いたままの client socket があっても停止を完了する', async () => {
+  const relay = new RelayProxy();
+  const port = await relay.start();
+  const client = net.connect(port, '127.0.0.1');
+  await once(client, 'connect');
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      relay.stop(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('relay stop timeout')), 1_000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    client.destroy();
+  }
+});
 
 test('readConnectResponse: 200 で解決し、余剰データを socket に戻す', async () => {
   const socket = mockSocket();

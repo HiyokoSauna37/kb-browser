@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import type { ChallengeVendor, SessionVerdict } from './challenge';
 import { normalizeUrl } from './util';
 import { PROFILES_DIR, SIGNUPS_DIR, ensureKbHome } from './paths';
 
@@ -20,10 +21,10 @@ export interface SignupCheckSummary {
   at: string;
   url: string;
   proxy: string;
-  verdict: string;
+  verdict: SessionVerdict;
   cookieCount: number;
   challenged: boolean;
-  vendor?: string;
+  vendor?: ChallengeVendor;
   marker?: string;
   finalUrl?: string;
   expectSelector?: string;
@@ -31,6 +32,27 @@ export interface SignupCheckSummary {
   expectCookie?: string;
   cookieMatched?: boolean;
 }
+
+/** signup が session.check から利用する最小の共有応答契約。 */
+export interface SignupSessionProbe {
+  label?: 'root' | 'target' | 'api';
+  challenged?: boolean;
+  finalUrl?: string;
+  selectorMatched?: boolean;
+  vendor?: ChallengeVendor;
+  marker?: string;
+}
+
+export interface SignupSessionCheck {
+  verdict: SessionVerdict;
+  cookieCount?: number;
+  probes?: SignupSessionProbe[];
+}
+
+export type AdoptionCheckPhase = Extract<
+  SignupPhase,
+  'adopted' | 'challenge-after-adopt' | 'degraded-after-adopt'
+>;
 
 export interface SignupState {
   version: 1;
@@ -292,13 +314,10 @@ export function sameSignupDestination(expected: string, actual?: string): boolea
 }
 
 export function classifyAdoption(
-  check: {
-    verdict: string;
-    probes?: { label?: string; challenged?: boolean; finalUrl?: string; selectorMatched?: boolean }[];
-  },
+  check: SignupSessionCheck,
   expectedUrl?: string,
   expectations: { selector?: string; cookie?: string; cookieNames?: readonly string[] } = {},
-): SignupPhase {
+): AdoptionCheckPhase {
   if (check.probes?.some((p) => p.challenged)) return 'challenge-after-adopt';
   const target = check.probes?.find((p) => p.label === 'target');
   if (expectedUrl && !sameSignupDestination(expectedUrl, target?.finalUrl)) return 'degraded-after-adopt';
@@ -308,18 +327,18 @@ export function classifyAdoption(
 }
 
 export function summarizeSignupCheck(
-  check: any,
+  check: SignupSessionCheck,
   url: string,
   proxy: string,
   expectations: { selector?: string; cookie?: string; cookieNames?: readonly string[] } = {},
 ): SignupCheckSummary {
-  const challenge = check.probes?.find((p: any) => p.challenged);
-  const target = check.probes?.find((p: any) => p.label === 'target');
+  const challenge = check.probes?.find((probe) => probe.challenged);
+  const target = check.probes?.find((probe) => probe.label === 'target');
   return {
     at: new Date().toISOString(),
     url,
     proxy,
-    verdict: String(check.verdict),
+    verdict: check.verdict,
     cookieCount: Number(check.cookieCount ?? 0),
     challenged: !!challenge,
     vendor: challenge?.vendor,

@@ -169,7 +169,7 @@ export function registerStateCommands(program: Command): void {
         print(r, (x) => {
           const c = x.client;
           const lines = [
-            `host: ${x.host}  (profile=${c.profile}, ${c.headless ? 'headless' : 'headed'}, channel=${c.channel}, stealth=${c.stealth ? 'on' : 'off'}${c.attached ? ', attached' : ''})`,
+            `host: ${x.host}  (profile=${c.profile}, ${c.headless ? 'headless' : 'headed'}, channel=${c.channel}, stealth=${c.stealth ? 'on' : 'off'}, proxy=${c.proxy}${c.attached ? ', attached' : ''})`,
           ];
           for (const p of x.probes) {
             const status = p.error ? `ERR ${p.error}` : `${p.status ?? '?'}`;
@@ -189,6 +189,21 @@ export function registerStateCommands(program: Command): void {
                 .join(', ')
             : '(セッション系 Cookie なし)';
           lines.push(`  cookies: ${cookies}  [この URL に送られる Cookie 計 ${x.cookieCount} 件]`);
+          const identity = x.identity;
+          lines.push(
+            `  identity: UA Chrome/${identity.userAgentChromeMajor ?? '?'}; UA-CH Chrome/${identity.userAgentDataChromeMajor ?? '?'}${identity.overridden ? '; custom UA' : ''}`,
+          );
+          if (!identity.coherent) {
+            lines.push(
+              `  ⚠ browser identity が矛盾しています (${identity.issues.join(', ')}). ` +
+                'Cloudflare 等では challenge loop の原因になります。custom UA は `kb daemon stop` 後に `kb daemon start --ua ""` で解除してください。',
+            );
+          }
+          if (c.proxy !== 'direct' && x.probes.some((p: any) => p.challenged)) {
+            lines.push(
+              `  ⚠ challenge 中の proxy は ${c.proxy} です。Verify 前後で proxy/IP を切り替えず、MITM 検査が原因か direct で切り分けてください。`,
+            );
+          }
           lines.push('', `verdict: ${x.verdict}`, `→ ${x.hint}`);
           return lines.join('\n');
         });

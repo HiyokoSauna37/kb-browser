@@ -49,11 +49,25 @@ export function browserAvailable(): boolean {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** graceful 終了不能時だけ使う、テスト専用 process tree の強制回収。 */
+function forceKillTree(pid: number): void {
+  if (process.platform === 'win32') return killTree(pid); // taskkill /T /F
+  try {
+    process.kill(-pid, 'SIGKILL'); // detached spawn の pgid は pid
+  } catch {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
 /** プロセス異常終了でも孤児 Chromium を残さないための最終保険(process 'exit' は同期処理のみ可)。 */
 const spawnedPids = new Set<number>();
 process.on('exit', () => {
   for (const pid of spawnedPids) {
-    if (isPidAlive(pid)) killTree(pid);
+    if (isPidAlive(pid)) forceKillTree(pid);
   }
 });
 
@@ -68,6 +82,8 @@ export async function startDaemon(extraArgs: string[] = []): Promise<E2EDaemon> 
       KB_IDLE_TIMEOUT: '0', // テスト中に idle reaper が発火しないように無効化
       KB_RELAY_NOAUTH: '1',
     },
+    // 本番クライアントと同じく独立した process group にし、異常時に Chromium を含めて回収する。
+    detached: true,
     stdio: 'ignore',
     windowsHide: true,
   });
@@ -126,6 +142,12 @@ export async function stopDaemon(d: E2EDaemon): Promise<void> {
   for (let i = 0; i < 50 && isPidAlive(d.pid); i++) await sleep(200);
   if (isPidAlive(d.pid)) killTree(d.pid);
   for (let i = 0; i < 25 && isPidAlive(d.pid); i++) await sleep(200);
+  if (isPidAlive(d.pid) && process.platform !== 'win32') {
+    // relay の keep-alive socket 等で graceful shutdown が止まってもテストを永久に残さない。
+    // detached spawn の pgid は pid なので、最後は子 Chromium ごと強制終了する。
+    forceKillTree(d.pid);
+    for (let i = 0; i < 25 && isPidAlive(d.pid); i++) await sleep(100);
+  }
   spawnedPids.delete(d.pid);
   // Chromium がプロファイルのロックを離すまで少し粘る(Windows のファイルロック対策)
   try {

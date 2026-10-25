@@ -3,7 +3,7 @@ import { clip, LogBuffer, normalizeUrl, parseHotkey, prepareEval } from '../shar
 import { Emulator } from './emulation';
 import { DialogManager } from './host/dialogs';
 import { DownloadManager } from './host/downloads';
-import { httpRequest, type HttpRequestOptions, type HttpResult } from './host/httpClient';
+import { browserHttpRequest, httpRequest, type HttpRequestOptions, type HttpResult } from './host/httpClient';
 import { attachOverCdp, launchOwned } from './host/launcher';
 import { checkSession, type SessionCheckResult } from './host/session';
 import { translateSegments } from './host/translate';
@@ -1049,6 +1049,7 @@ export class BrowserHost {
       expectSelector: opts.expectSelector,
       timeoutMs: opts.timeoutMs ?? 15_000,
       profile: this.profile,
+      configuredUserAgent: this.opts.userAgent,
     });
     return {
       ...result,
@@ -1064,15 +1065,19 @@ export class BrowserHost {
     };
   }
 
-  // ---- HTTP リクエスト (ページ非依存のミニ REST クライアント) ----
+  // ---- HTTP リクエスト (ページ非依存 / Verify 済み page fetch) ----
 
   /**
-   * ブラウザの context.request で HTTP リクエストを送る。ページを開かずに API を叩ける。
-   * Cookie はブラウザと共有され(Set-Cookie も反映される)、プロキシ設定も同じものを使う。
-   * ページイベントに乗らない通信なので、通信ログには NetMonitor へ明示的に記録する
-   * (kb net log に出て、kb net body / kb net export の HAR にも含まれる)。
+   * 既定は context.request のページ非依存 HTTP、viaBrowser は active page 内 fetch。
+   * 前者はページイベントに乗らないため NetMonitor へ明示記録し、後者は通常の fetch として
+   * 自動捕捉される。viaBrowser は Verify 済みページと Cookie / TLS / UA / Origin を揃える用途。
    */
-  async httpRequest(opts: HttpRequestOptions): Promise<HttpResult> {
+  async httpRequest(opts: HttpRequestOptions & { viaBrowser?: boolean; tab?: number }): Promise<HttpResult> {
+    if (opts.viaBrowser) {
+      const { page } = this.getPage(opts.tab);
+      // page fetch は NetMonitor が通常の fetch として捕捉するため、external recorder へ二重記録しない。
+      return browserHttpRequest(page, opts);
+    }
     return httpRequest(this.context, opts, (ex) => this.net.recordExternalRequest(ex));
   }
 
@@ -1254,6 +1259,7 @@ export class BrowserHost {
       ...(this.opts?.detachKey && !this.attached ? { detachKey: this.opts.detachKey } : {}),
       ...(this.opts?.translateKey && !this.attached ? { translateKey: this.opts.translateKey } : {}),
       ...(this.opts?.ignoreHttpsErrors ? { ignoreHttpsErrors: true } : {}),
+      ...(this.opts?.userAgent ? { userAgent: this.opts.userAgent } : {}),
       ...(this.opts?.ignoreCertErrorsSpkiList?.length ? { trustedCaSpki: this.opts.ignoreCertErrorsSpkiList.length } : {}),
       ...(this.dialogs.pendingCount ? { pendingDialogs: this.dialogs.pendingTabs } : {}),
       ...(this.dialogs.currentPolicy !== 'hold' ? { dialogPolicy: this.dialogs.currentPolicy } : {}),

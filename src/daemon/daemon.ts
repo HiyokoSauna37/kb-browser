@@ -371,7 +371,10 @@ export class Daemon {
       'ws.recv': (a) => host.wsRecv({ id: a.id, since: a.since, limit: a.limit, tab: a.tab }),
       'ws.list': (a) => host.wsList(a.tab),
       'ws.close': (a) => host.wsClose({ id: a.id, code: a.code, reason: a.reason, tab: a.tab }),
-      'session.check': (a) => host.sessionCheck({ url: a.url, api: a.api, expectSelector: a.expectSelector, timeoutMs: a.timeoutMs }),
+      'session.check': async (a) => {
+        const result = await host.sessionCheck({ url: a.url, api: a.api, expectSelector: a.expectSelector, timeoutMs: a.timeoutMs });
+        return { ...result, client: { ...result.client, proxy: relay.status().active } };
+      },
       'log.start': (a) => journal.start(a.name, this.sessionMeta(), { shots: !!a.shots }),
       'log.stop': () => journal.stop(),
       'log.status': () => journal.status(),
@@ -384,6 +387,8 @@ export class Daemon {
           timeoutMs: a.timeoutMs,
           follow: a.follow,
           verbose: a.verbose,
+          viaBrowser: a.viaBrowser,
+          tab: a.tab,
           savePath: a.savePath,
           maxChars: a.maxChars,
           offset: a.offset,

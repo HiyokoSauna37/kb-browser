@@ -382,7 +382,7 @@ tool(
 
 tool(
   'kb_request',
-  'ページを開かずに HTTP リクエストを送る(ミニ REST クライアント)。Cookie とプロキシ設定はブラウザと共有され、Set-Cookie も反映される。レスポンスの Set-Cookie は常に表示し、全レスポンスヘッダは includeHeaders で表示する。followVerbose でリダイレクト各ホップの status/Location/Set-Cookie を表示する。',
+  'HTTP リクエストを送る。既定はページ非依存のミニ REST クライアント。viaBrowser=true は Verify 済み active tab と同一 origin の page fetch を使い、Cookie/TLS/UA/Origin をそのブラウザ経路に揃える。通常モードでは Set-Cookie を常に表示し、全レスポンスヘッダは includeHeaders で表示する。followVerbose でリダイレクト各ホップを表示する。',
   {
     url: z.string().describe('リクエスト先 URL(スキーム省略時は https)'),
     method: z.string().optional().describe('HTTP メソッド(既定 GET)'),
@@ -391,10 +391,14 @@ tool(
     timeoutSec: z.number().optional().describe('タイムアウト秒(既定 30)'),
     includeHeaders: z.boolean().optional().describe('レスポンスの全ヘッダを含める(既定は Set-Cookie のみ表示)'),
     followVerbose: z.boolean().optional().describe('リダイレクトを追いつつ各ホップの status / Location / Set-Cookie を表示する'),
+    viaBrowser: z.boolean().optional().describe('active tab 内の同一 origin fetch で送る(Verify 済みブラウザ経路を維持)'),
+    tab,
     maxChars: z.number().int().optional().describe('本文の最大文字数 (0 = 無制限)'),
     offset: z.number().int().optional().describe('取得開始位置'),
   },
-  safe(async ({ url, method, headers, data, timeoutSec, includeHeaders, followVerbose, maxChars, offset }) => {
+  safe(async ({ url, method, headers, data, timeoutSec, includeHeaders, followVerbose, viaBrowser, tab, maxChars, offset }) => {
+    if (viaBrowser && followVerbose) throw new Error('viaBrowser と followVerbose は併用できません');
+    if (tab != null && !viaBrowser) throw new Error('tab は viaBrowser=true のときだけ指定できます');
     const r = await rpc('request', {
       url,
       method,
@@ -402,13 +406,15 @@ tool(
       data,
       timeoutMs: (timeoutSec ?? REQUEST_TIMEOUT_SEC) * 1000,
       verbose: followVerbose,
+      viaBrowser,
+      tab,
       maxChars,
       offset,
     });
     const hops = r.hops ?? [];
     const chain = hops.length ? redirectHopLines(hops) + '\n' : '';
     const finalUrl = hops.length ? `  ${r.url}` : '';
-    let head = `${chain}HTTP ${r.status} ${r.statusText}${finalUrl} (${r.ms}ms${hops.length ? ' total' : ''}, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''})`;
+    let head = `${chain}HTTP ${r.status} ${r.statusText}${finalUrl} (${r.ms}ms${hops.length ? ' total' : ''}, ${r.bytes} bytes${r.contentType ? `, ${r.contentType}` : ''}${viaBrowser ? ', via=browser' : ''})`;
     const setCookies: string[] = r.setCookies ?? [];
     if (includeHeaders) {
       // set-cookie は個別行で出す(res.headers() の畳み込みでは parse できないため setCookies を使う)

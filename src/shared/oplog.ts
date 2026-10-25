@@ -418,6 +418,8 @@ export function toCliString(e: CommandEvent): string {
       if (a.method && String(a.method).toUpperCase() !== 'GET') s += ` -X ${String(a.method).toUpperCase()}`;
       for (const [k, v] of Object.entries((a.headers as Record<string, string>) ?? {})) s += ` -H ${q(`${k}: ${v}`)}`;
       if (a.data != null) s += ` -d ${q(a.data)}`;
+      if (a.viaBrowser) s += ' --via-browser';
+      if (a.tab != null) s += ` -t ${a.tab}`;
       return s;
     }
     case 'screenshot':
@@ -506,7 +508,8 @@ function urlSlug(url: string): string {
 
 /**
  * requests/ に書き出すファイル群を生成する(マスク適用済みイベントを渡すこと)。
- * ページが発行した通信(net イベント)に加え、kb request コマンドも curl 化する。
+ * ページが発行した通信(net イベント)は curl 化する。kb request の command event は
+ * 既定経路なら curl、browser 経路なら同じ kb コマンドとして書き出す。
  */
 export function requestFiles(events: OpEvent[]): { name: string; content: string }[] {
   const out: { name: string; content: string }[] = [];
@@ -530,7 +533,10 @@ export function requestFiles(events: OpEvent[]): { name: string; content: string
     }
     if (!net) continue;
     const name = `${String(net.seq).padStart(4, '0')}-${net.method}-${urlSlug(net.url)}.sh`;
-    const content = `#!/bin/sh\n# ${net.ts}  ${net.method} ${net.url} → ${net.status ?? '?'} (${net.resourceType})\n${toCurlCommand(net)}\n`;
+    // page 内 fetch は browser-managed Cookie / UA / Origin / TLS を curl では再現できない。
+    // command event 由来なら kb 自身の browser 経路を使うコマンドとして書き出す。
+    const replay = e.type === 'command' && e.cmd === 'request' && (e.args as any).viaBrowser ? toCliString(e) : toCurlCommand(net);
+    const content = `#!/bin/sh\n# ${net.ts}  ${net.method} ${net.url} → ${net.status ?? '?'} (${net.resourceType})\n${replay}\n`;
     out.push({ name, content });
   }
   return out;

@@ -109,6 +109,15 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
             'Set-Cookie': ['e2e1=v1; Path=/', 'e2e2=v2; Path=/'],
           });
           res.end('cookie ok');
+        } else if (req.url === '/browser-request') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              cookie: req.headers.cookie ?? '',
+              userAgent: req.headers['user-agent'] ?? '',
+              secFetchSite: req.headers['sec-fetch-site'] ?? '',
+            }),
+          );
         } else if (req.url === '/protected') {
           // アプリ由来の 403(bot チャレンジのマーカーは無い)
           res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -320,6 +329,24 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
     const names = cookies.map((c: { name: string }) => c.name);
     assert.ok(names.includes('e2e1'), `e2e1 が cookie に載るはず: ${names.join(',')}`);
     assert.ok(names.includes('e2e2'), `e2e2 が cookie に載るはず: ${names.join(',')}`);
+  });
+
+  test('request --via-browser: active tab の Cookie / UA / browser fetch 経路を使う', async () => {
+    const opened = await rpc('open', { url: `${origin}/page.html` });
+    await rpc('eval', {
+      tab: opened.tab,
+      expression: `document.cookie = 'browser_path=yes; Path=/'; true`,
+    });
+    const result = await rpc('request', {
+      url: `${origin}/browser-request`,
+      viaBrowser: true,
+      tab: opened.tab,
+    });
+    assert.equal(result.status, 200);
+    const body = JSON.parse(result.body);
+    assert.match(body.cookie, /browser_path=yes/);
+    assert.match(body.userAgent, /Chrom(?:e|ium)\//);
+    assert.equal(body.secFetchSite, 'same-origin');
   });
 
   test('storage.restore replace: Cookie と localStorage を checkpoint に正確に置換する', async () => {
