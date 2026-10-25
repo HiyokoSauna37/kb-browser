@@ -42,6 +42,7 @@ test('normalizeSignupUrl は http(s) のみを許可する', () => {
 test('bootstrap の通常ブラウザ引数に CDP / automation / stealth / headless 痕跡を入れない', () => {
   const args = bootstrapBrowserArgs(path.resolve('profile'), 'https://example.com/signup', { direct: true });
   assert.ok(args.includes('--no-proxy-server'));
+  assert.ok(args.includes('--disable-background-mode'));
   assert.ok(args.some((arg) => arg.startsWith('--user-data-dir=')));
   assert.equal(args.at(-1), 'https://example.com/signup');
   const joined = args.join(' ').toLowerCase();

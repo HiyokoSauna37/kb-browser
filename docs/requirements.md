@@ -183,9 +183,10 @@ signup は challenge の自動突破機能ではない。許可された対象�
 1. kb デーモンが停止している場合だけ実行する。
 2. インストール済み Chrome または Edge を専用 profile で起動する。同梱 Chromium は使用しない。
 3. Playwright、CDP、remote debugging、automation、および stealth 用の引数や script を使用しない。
-4. 接続は既定 direct とし、明示指定時だけ OS の system proxy を使用する。
-5. 同名 signup の再利用、既存 profile の再利用、origin の変更は明示的に検証する。既存状態は `--reuse-profile` なしに上書きしない。
-6. process 一覧と `--user-data-dir` を用いて profile 利用中のブラウザを検出し、同じ profile の二重起動を拒否する。
+4. 専用 profile では background mode を無効にし、ウィンドウ終了後に profile lock と Cookie DB を残す background process を起動しない。
+5. 接続は既定 direct とし、明示指定時だけ OS の system proxy を使用する。
+6. 同名 signup の再利用、既存 profile の再利用、origin の変更は明示的に検証する。既存状態は `--reuse-profile` なしに上書きしない。
+7. process 一覧と `--user-data-dir` を用いて profile 利用中のブラウザを検出し、同じ profile の二重起動を拒否する。
 
 ### 6.2 adopt
 

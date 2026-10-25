@@ -241,6 +241,9 @@ export function bootstrapBrowserArgs(profileDir: string, url: string, opts: { di
     `--user-data-dir=${profileDir}`,
     '--no-first-run',
     '--no-default-browser-check',
+    // 専用 profile で background app を残さず、ウィンドウを閉じた時点で Cookie DB を
+    // flush して profile lock を解放する。automation / CDP 用のフラグではない。
+    '--disable-background-mode',
     '--new-window',
     ...(opts.direct ? ['--no-proxy-server'] : []),
     url,
