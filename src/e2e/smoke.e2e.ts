@@ -479,6 +479,12 @@ describe('kb e2e smoke', { skip: available ? false : 'ブラウザ(chromium/chro
       timeoutMs: 1_000,
     });
     assert.equal(matched.probes.find((p: any) => p.label === 'target').selectorMatched, true);
+    assert.ok(matched.identity.userAgent);
+    assert.ok(
+      matched.identity.userAgentData?.brands.some((brand: any) => /Chromium|Chrome|Edge/i.test(brand.brand)),
+      JSON.stringify(matched.identity),
+    );
+    assert.equal(matched.identity.coherent, true);
 
     const missing = await rpc('session.check', {
       url: `${origin}/account-marker`,

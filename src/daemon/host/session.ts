@@ -274,8 +274,9 @@ export async function checkSession(
   const probes: SessionProbe[] = [];
   let identity = diagnoseBrowserIdentity({ userAgent: '' }, opts.configuredUserAgent);
   try {
-    // 診断情報の取得失敗だけで session check 本体を止めない。about:blank 上で読むため
-    // target の script による navigator 上書きには影響されず、実際の起動 identity を測れる。
+    probes.push(await navigateProbe(page, 'root', rootUrl, opts.timeoutMs));
+    // Chromium は low-entropy UA Client Hints を secure context でだけ公開するため、
+    // about:blank ではなく root probe の遷移後に読む。診断取得の失敗だけで check 本体は止めない。
     const effectiveIdentity = await page
       .evaluate(() => {
         const nav = navigator as Navigator & {
@@ -301,7 +302,6 @@ export async function checkSession(
     if (effectiveIdentity) {
       identity = diagnoseBrowserIdentity(effectiveIdentity, opts.configuredUserAgent);
     }
-    probes.push(await navigateProbe(page, 'root', rootUrl, opts.timeoutMs));
     probes.push(await navigateProbe(page, 'target', opts.url, opts.timeoutMs, opts.expectSelector));
     if (opts.apiUrl) {
       const sameOrigin = (() => {
