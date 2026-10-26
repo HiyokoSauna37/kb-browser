@@ -2,7 +2,8 @@
 
 この文書は、kb のコマンドラインインターフェース（CLI）、MCP ツール、環境変数、永続化ファイルを一覧化したリファレンスです。
 
-- 通常の導入手順と代表例: [README.ja.md](../README.ja.md)
+- はじめに・インストール: [README.ja.md](../README.ja.md)
+- 機能別の使い方・詳しい例: [使い方ガイド](USAGE.ja.md)
 - 開発・内部構造: [CLAUDE.md](../CLAUDE.md)
 - この文書の基準: リポジトリ内の実装と <code>kb --help</code>
 

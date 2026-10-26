@@ -1,4 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="kb — CLI Browser">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="kb — Browser tools for you and your AI. Windows and macOS.">
+  <title>kb — Browser tools for you and your AI</title>
+  <desc>Open pages, read text, and capture screenshots on Windows and macOS.</desc>
   <defs>
     <linearGradient id="bbg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#141a28"/>
@@ -22,16 +24,16 @@
       <text x="40" y="228" fill="#3ddc97">&gt;</text>
       <text x="112" y="228" fill="#e9eef5">kb</text>
     </g>
-    <rect x="232" y="152" width="21" height="76" rx="3" fill="#3ddc97"/>
+    <rect x="242" y="152" width="21" height="76" rx="3" fill="#3ddc97"/>
   </g>
 
   <!-- wordmark + tagline -->
   <g font-family="ui-monospace, 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace">
     <text x="530" y="300" font-size="150" font-weight="700" fill="#e9eef5">kb</text>
-    <text x="702" y="300" font-size="54" font-weight="500" fill="#7d8aa0">— CLI Browser</text>
+    <text x="738" y="300" font-size="54" font-weight="500" fill="#7d8aa0">— CLI Browser</text>
   </g>
   <g font-family="-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
-    <text x="532" y="360" font-size="36" fill="#c4cdda" textLength="700" lengthAdjust="spacingAndGlyphs">A browser you drive entirely from the command line.</text>
-    <text x="532" y="426" font-size="30" fill="#3ddc97" font-weight="600" textLength="700" lengthAdjust="spacingAndGlyphs">Playwright + Chromium &#160;·&#160; MCP &#160;·&#160; DevTools &#160;·&#160; Proxy &#160;·&#160; Agent-ready</text>
+    <text x="532" y="360" font-size="32" fill="#c4cdda">Your browser, ready for you and your AI.</text>
+    <text x="532" y="426" font-size="26" fill="#3ddc97" font-weight="600">Windows + macOS &#160;·&#160; Browse &#160;·&#160; Read &#160;·&#160; Capture</text>
   </g>
 </svg>

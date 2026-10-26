@@ -1,447 +1,182 @@
 <p align="center">
-  <img src="assets/banner.png" alt="kb — CLI Browser" width="760">
+  <img src="assets/banner.svg" alt="kb — 人にも AI にも使えるブラウザ操作ツール。Windows・macOS 対応。" width="760">
 </p>
 
 <p align="center">
-  <b>すべての操作を CLI から行えるブラウザ。</b> Playwright + Chromium (CDP) ベース。
+  <b>いつものブラウザ操作を、短いコマンドでも。</b><br>
+  Windows でも、Mac でも。自分で使って、AI にも任せられる kb。
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Windows-supported-3ddc97.svg" alt="Windows 対応">
+  <img src="https://img.shields.io/badge/macOS-supported-3ddc97.svg" alt="macOS 対応">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3ddc97.svg" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/node-%E2%89%A518-3ddc97.svg" alt="Node >= 18">
-  <img src="https://img.shields.io/badge/Playwright-Chromium-2a3244.svg" alt="Playwright + Chromium">
-  <img src="https://img.shields.io/badge/MCP-34%20tools-2a3244.svg" alt="MCP · 34 tools">
 </p>
 
-English version: [README.md](README.md)
+<p align="center">
+  <a href="#できること">できること</a> ·
+  <a href="#はじめる">はじめる</a> ·
+  <a href="#ai-と一緒に使う">AI と使う</a> ·
+  <a href="docs/USAGE.ja.md">詳しい使い方</a> ·
+  <a href="README.md">English</a>
+</p>
 
-GUI ブラウザが持つ機能 — ページのレンダリング、Cookie 管理、DevTools 操作(Network / Console / Elements)— を `kb` コマンドで扱えます。FoxyProxy 風のプロキシプロファイル管理(**ブラウザ無再起動の即時切替**、ホスト別振り分けルール)を内蔵。Claude Code などの AI エージェントから Bash / MCP 経由で操作することを想定しつつ、ウィンドウは本物の Chrome なので人間の手動操作といつでも併用できます。
+**kb は、Chrome や Edge を短いコマンドで操作するツールです。** ページを開く、文章を取り出す、スクリーンショットを残す。いつものブラウザ作業を、ターミナルから行えます。
 
-> **想定している 2 つの使い方:**
-> - **AI エージェントから操作** — Claude Code などのエージェントが **MCP(34 ツール)** または **Bash**(action 結果は全コマンド `--json` 対応)で kb を駆動。アクセシビリティ snapshot + `--ref` のループは低トークンで確実な自動操作に最適化され、常駐デーモンにより各操作は数十 ms で返る。
-> - **セキュリティ調査・バグバウンティの recon**(認可されたテスト限定)— セッション共有 HTTP、ネットワークのライブ監視/改変、認証済み SPA での生 `eval`、Burp/Caido への proxy チェーン、プロファイルによる 2 アカウント IDOR、機微値マスク済みの共有可能な証跡バンドル。詳細は [セキュリティ調査・バグバウンティの recon](#セキュリティ調査バグバウンティの-recon) を参照。
+画面には実際のブラウザが開くので、マウスやキーボードでも操作できます。AI エージェントと組み合わせれば、ページの確認や繰り返しの操作を任せることもできます。AI を使わず、コマンドだけでも利用できます。
 
-## 特徴
+**macOS でもそのまま使えます。** Windows と同じソース・同じ基本コマンドで動き、Mac だけで利用できます。Windows へのリモート接続は不要です。
 
-- **デーモン常駐** — ブラウザは起動しっぱなし。各 CLI コマンドは数十 ms で返る
-- **インストール済み Chrome/Edge を利用** — DRM を含む実ブラウザを優先し、なければ同梱 Chromium にフォールバック。`--channel` で明示選択、`--ua` で UA 上書き。ステルスは既定 ON で基本的な `navigator.webdriver` 露出を抑えるが、Cloudflare production challenge の通過は保証しない。人による Verify と通信経路の維持は [ボットチェックを通す](#ボットチェックを通す)参照
-- **タブを別ウィンドウへ分離** — `kb tabs detach <id...>` で 1 つ以上のタブをまとめて新しい 1 枚のウィンドウへ(`--detach-key` でキー割り当ても)。[タブの分離](#タブの分離)参照
-- **ページを翻訳** — `kb translate` が Chrome の「このページを翻訳」相当に本文を in-place で日本語化(`--toggle` で翻訳⇄原文、`--text` で出力のみ、`--translate-key` でキー割り当て)。[ページの翻訳](#ページの翻訳)参照
-- **起動済みブラウザへのアタッチ** — `kb daemon start --cdp http://127.0.0.1:9222` で、`--remote-debugging-port` 付きで起動した Chrome/Edge にそのまま接続し、そのサインイン状態を再利用できる
-- **Chrome 拡張機能** — `kb daemon start --extensions <拡張dir,...>` で解凍済み拡張を読み込む(`on` でプロファイルにインストール済みの拡張を有効化、`off` で解除)。詳細は [Chrome 拡張機能](#chrome-拡張機能) を参照
-- **エージェント最適化** — `kb snapshot` が要素 ref 付きアクセシビリティツリーを返し、`kb click --ref e12` で確実に操作(iframe 内も対応)。再レンダで ref が失効しても同じ role/name の要素へ**自動再解決**。text / html / snapshot は既定 20000 文字で切り詰め、`--offset` で続きを取得。`kb eval` は await・複数行コードもそのまま実行可
-- **ターミナルから DevTools** — ネットワークログ / レスポンス本文 (`kb net body`) / 全ヘッダ (`kb net headers`) / リクエスト遮断 / レスポンスモック(既存リクエストのエラー差し替えも)/ HAR 記録 / コンソール / DOM 検査
-- **2 経路の HTTP クライアント** — `kb request` はページ非依存、`--via-browser` は Verify 済みタブ内の同一 origin fetch。後者は Cookie だけでなく TLS・UA・Origin も同じブラウザ経路を使う
-- **プロキシプロファイル** — `host:port`(+認証)を名前付きで保存、無再起動で即時切替。特定ホストだけ特定プロキシへ(FoxyProxy 風ルール)。Chromium 非対応の SOCKS5 認証は内蔵中継が代行(中継自体もトークン認証で保護)
-- **headed ⇄ headless / プロファイル切替** — タブ URL は復元し、Cookie は各プロファイル内で分離・永続化
-- **ログイン状態の永続化** — 一度サインインすればプロファイルに自動保存され、次回以降も維持。`kb login` で手動サインインの流れをコマンド一つに。`kb storage dump / restore` でファイルへの持ち出しも可
-- **操作記録** — 実行した操作・通信・コンソールを既定で常時記録。`kb log export` で「レポート + 再現手順 + request script + スクショ」のレビュー・再実行用バンドルを生成(機微な値は既定でマスク)
-- **人間との協調** — 自動操作中でもログインや CAPTCHA はユーザーがウィンドウで直接操作し、`kb wait` で完了を検知して再開
-- **MCP サーバ** — `kb-mcp` が 34 ツールを公開(スクリーンショットは画像で返る)
-- **action 結果の `--json`** — 全コマンドで使えるスクリプト・エージェント向けの機械可読出力
+## できること
 
-## インストール
-
-```bash
-npm install
-npm run build
-npm link        # kb / kb-mcp をグローバルに
-```
-
-ブラウザ実体はインストール済みの Chrome → Edge → Playwright 同梱 Chromium の順で自動選択されます(同梱版を使う場合のみ `npx playwright install chromium`)。
-
-全コマンド、引数、オプション、既定値、MCP の入力、環境変数については [CLI / MCP 完全リファレンス](docs/CLI_REFERENCE.ja.md) を参照してください。
-
-## クイックスタート
-
-```bash
-kb open example.com        # デーモン(ブラウザ)が自動起動して開く
-kb text                    # 本文をテキストで読む
-kb snapshot                # 要素 ref 付きのページ構造(操作対象を探す)
-kb click --ref e6          # ref で確実にクリック
-kb screenshot -o s.png     # スクリーンショット
-kb daemon stop             # ブラウザごと終了
-```
-
-デフォルトは headed(ウィンドウ表示)。Cookie・ログイン状態は `~/.kb/profiles/` に永続化されます。
-
-## コマンド一覧
-
-| 分類 | コマンド |
+| こんなときに | kb でできること |
 |---|---|
-| デーモン | `kb daemon start [--headless] [--profile <n>] [--channel chrome\|msedge\|chromium] [--ua <s>] [--no-stealth] [--detach-key [combo]] [--translate-key [combo]] [--extensions <dirs\|on\|off>] [--cdp <url>] / stop / status`(ステルスは既定 ON) |
-| ページ | `kb open <url> [-n] [--wait idle]` / `kb tabs [close/switch <id> / detach <id...>]` / `kb text` / `kb translate [--to ja] [--restore\|--toggle\|--text]` / `kb html` / `kb snapshot` / `kb screenshot [<sel>\|--ref e12] [-f] [--timeout <sec>]`(要素単位も可)/ `kb pdf`(headless のみ) |
-| ナビゲーション | `kb back` / `kb forward` / `kb reload` / `kb scroll [--to <sel>/--bottom]` |
-| 操作 | `kb click` / `kb fill` / `kb select [--label]` / `kb check` / `kb uncheck` / `kb hover` / `kb upload <sel> <ローカルファイルパス...>` / `kb press <key>` / `kb eval <js> [--file f.js]`(await・複数行可、最後の式の値が返る)— 対象は CSS セレクタ、`--ref e12`(snapshot の ref)、`--frame <sel>`(iframe 内)で指定 |
-| ダイアログ | `kb dialog [show]` / `kb dialog accept [text]` / `kb dialog dismiss` / `kb dialog policy [hold\|accept\|dismiss]`(`alert`/`confirm`/`prompt` を保留してから応答。既定 `hold`) |
-| HTTP | `kb request <url> [-X POST] [-H "Name: value"] [-d body \| --data-file f] [-o file] [--no-follow \| --follow-verbose] [--via-browser [-t id]]`(既定はページ非依存。`--via-browser` は Verify 済みタブ内の同一 origin fetch) |
-| ログイン | `kb login [url] [--until <glob>] [--save <file>]`(手動サインイン → 状態はプロファイルに自動保存) |
-| アカウント作成 | `kb signup bootstrap <name> <url> [--check-url <url>] [--expect-selector <sel>] [--expect-cookie <name>]` / `adopt <name> [--restore-proxy]` / `status [name]` / `checkpoint <name>`(通常 Chrome で登録後、同じ専用 profile を kb へ引き継ぐ) |
-| Cookie / セッション | `kb cookies [list/get/set/rm/clear/export/import]` / `kb storage dump` / `kb storage restore <file> [--replace]` / `kb session check <url> [--expect-selector <sel>]` |
-| ダウンロード | `kb downloads [list/clear]`(`~/.kb/downloads/` に自動保存) |
-| Network | `kb net log [-f] [--filter re] [--responses]` / `kb net body <seq>`(レスポンス本文)/ `kb net headers <seq>`(全ヘッダ)/ `kb net block <glob>` / `kb net mock <glob> [--body f\|--text s] [--status n]` / `kb net unroute <id>\|--all` / `kb net har start/stop` |
-| Console | `kb console [-f]` |
-| 操作記録 | `kb log [list]` / `kb log start [--name n] [--shots] / stop / status` / `kb log show/steps [--no-mask]` / `kb log export [-o dir]` / `kb log replay [n] [--dry-run]` / `kb log rm <n>` |
-| DOM | `kb dom query <sel> [--html] [--attr name] [--frame <sel>]`(属性がなければ value/checked 等の同名プロパティにフォールバック) |
-| プロキシ | `kb proxy add/rm/list/use/off/status/test` / `kb proxy rule add/rm/list` |
-| モード / プロファイル | `kb mode headed\|headless` / `kb profile list/use <n>`(タブ URL は復元、Cookie は各 profile に保持) |
-| 認証 | `kb auth set <user> <pass>` / `kb auth clear`(対象サイトの Basic 認証) |
-| 待機 | `kb wait [--url <glob>] [--selector <sel>] [--idle] [--any]`(複数条件は既定 AND、`--any` で OR) |
-| エミュレーション | `kb emulate ua/viewport/tz/geo/net/reset`(net: offline/slow3g/fast3g) |
+| ページの文章をメモや資料に使いたい | 本文をテキストとして取り出す |
+| Web サイトの表示を残したい | 今の画面や、ページ全体のスクリーンショットを保存する |
+| 外国語のページを読みたい | 表示中の文章を翻訳し、原文に戻す |
+| 同じ確認作業を繰り返したい | ページを開く・クリックする・入力する操作をコマンドで組み合わせる |
+| AI にブラウザ作業を手伝ってほしい | AI がページを読み、必要なボタンや入力欄を操作する |
 
-長文出力(text / html / snapshot)は既定 20000 文字で切り詰められ、`--offset <n>` で続き、`--max-chars 0` で全文を取得できます。
+通信の確認やプロキシ連携など、開発・調査向けの機能もあります。必要になったら [使い方ガイド](docs/USAGE.ja.md) で詳しく読めます。
 
-## JS ダイアログ (alert / confirm / prompt)
+## kb の考え方
 
-クリック等で `confirm` / `alert` / `prompt` が開くページでも操作できます。kb はダイアログを**保留**して表示したまま応答を待つため(既定 `hold`)、操作の応答には `dialog` が含まれます:
+- **画面を見ながら使う。** ブラウザで何が起きているかを確認でき、ログインなどは自分で操作できます。作業に応じて、人と AI が同じウィンドウを使います。
+- **小さな操作を組み合わせる。** 「開く」は `kb open`、「読む」は `kb text`。まずは数個のコマンドから始めて、必要な操作を足していけます。
+- **続きから作業する。** 起動中は同じブラウザを使い続け、ログイン情報は kb 専用の保存領域に残します。普段の Chrome とは別管理なので、初回は kb のウィンドウでログインします。
 
-```bash
-kb click "#delete"
-# → clicked → confirm ダイアログ「本当に削除しますか?」が応答待ちです (tab 1)。
-#    kb dialog accept / kb dialog dismiss で応答してください
+kb 自体は AI ではありません。ブラウザの読み取りや操作を kb が受け持ち、要約や判断は接続した AI エージェントが行います。
 
-kb dialog                 # 応答待ちのダイアログを確認
-kb dialog accept          # OK(confirm は true、prompt は既定値で確定)
-kb dialog accept "田中"   # prompt に値を入れて OK
-kb dialog dismiss         # キャンセル
+## はじめる
+
+初回はターミナルでセットアップします。Mac は「ターミナル」、Windows は PowerShell を開いてください。
+
+必要なものは **Git、Node.js 18 以上（npm を含む）、Google Chrome または Microsoft Edge** です。それぞれ、お使いの OS で動作する版を用意してください。
+
+### 1. kb をインストールする
+
+保存したいフォルダで、次を 1 行ずつ実行します。Windows・macOS 共通です。
+
+```sh
+git clone https://github.com/HiyokoSauna37/kb-browser.git
+cd kb-browser
+npm ci
+npm run build
+npm link
 ```
 
-保留中はそのタブの他操作(`snapshot` / `text` / `click` など)がガードされ、先にダイアログへ応答するよう促されます。headed では画面にネイティブダイアログが出るので、ウィンドウ上で直接 OK / キャンセルしても構いません(kb 側の保留も自動で解除されます)。
+`npm link` が終わると、どのフォルダからでも `kb` と入力して使えます。`kb --version` でバージョンが表示されれば準備完了です。
 
-一律に自動応答したいときはポリシーを変えられます:
+<details>
+<summary>Mac で「EACCES」「permission denied」と出たら</summary>
 
-```bash
-kb dialog policy accept    # 以降すべて自動で OK(表示せず即応答)
-kb dialog policy dismiss   # 以降すべて自動でキャンセル(従来の挙動)
-kb dialog policy hold      # 既定に戻す(保留して応答を待つ)
+`npm link` の登録先に書き込めない場合は、同じ `kb-browser` フォルダで、ユーザー用の場所に登録できます。
+
+```sh
+npm_config_prefix="$HOME/.local" npm link
+export PATH="$HOME/.local/bin:$PATH"
+kb --version
 ```
 
-> 以前は Playwright の既定でダイアログが即 dismiss され、`confirm` を伴うボタンが「押しても反応しない」ように見えていました。`hold` はこれを解消し、ダイアログを人にも見せ、応答も選べるようにします。
+標準の zsh を使っている場合は、`export PATH="$HOME/.local/bin:$PATH"` の行を `~/.zshrc` にも追記すると、次にターミナルを開いたときも使えます。すでに同じ設定があれば追記は不要です。
 
-## ページの翻訳
+</details>
 
-Chrome の「このページを翻訳」相当。既定では表示テキストを **in-place**(レイアウトを保ったまま)で書き換え、原文を覚えておくので元に戻せます:
+<details>
+<summary>Chrome / Edge を使わずに試したい場合</summary>
 
-```bash
-kb translate                 # ページを日本語へ in-place 翻訳(既定 --to ja)
-kb translate --restore       # 原文に戻す
-kb translate --toggle        # 翻訳 ⇄ 原文 を切り替え(訳はキャッシュを再利用)
-kb translate --to en         # 別の言語へ翻訳
-kb translate --text          # ページは書き換えず、翻訳テキストだけ出力(閲覧/エージェント用)
+`kb-browser` フォルダで次を実行すると、kb が利用する Chromium をダウンロードできます。
+
+```sh
+npx playwright install chromium
+kb daemon start --channel chromium
 ```
 
-ウィンドウ内でキー一発で 翻訳 ⇄ 原文 を切り替えるキー割り当て:
+通常は、インストール済みの Chrome → Edge → この Chromium の順に自動選択します。Safari は操作対象に含まれません。
 
-```bash
-kb daemon start --translate-key            # 既定コンボ Alt+Shift+T(翻訳 ⇄ 原文 トグル)
-kb daemon start --translate-key "Ctrl+J"   # 好きなコンボに。"off" で無効化
+</details>
+
+### 2. ページを開いてみる
+
+次も 1 行ずつ実行してください。
+
+```sh
+kb open https://example.com
+kb text
+kb screenshot -o example.png
 ```
 
-SPA(シングルページアプリ)にも対応しています: サイトがページを実際に読み込み直さず中身だけ差し替える「ソフト遷移」をしたときは、`kb translate` / トグルキーが「実質別ページになった」ことを検知し、古いキャッシュの切替ではなく新しい内容を翻訳し直します。メニューやヘッダなど繰り返し出てくる文言はデーモン全体でキャッシュされるため、同じサイト内を遷移し続けても新しい部分だけを翻訳します。
+ブラウザに「Example Domain」が開き、ターミナルに本文が表示されます。`example.png` は、コマンドを実行したフォルダに保存されます。
 
-翻訳は Google の無料公開エンドポイント(鍵不要)をブラウザのプロキシ経由で使います。非公式なので巨大ページはレート制限に当たることがあり、kb はリクエスト数を上限で抑え(レート制限応答は 1 回だけ再試行)、未翻訳部分が残った場合は知らせます。
+開いたウィンドウは、そのまま手で操作しても大丈夫です。作業を終えるときは、次のコマンドで kb のブラウザを閉じます。
 
-## タブの分離
-
-1 つ以上のタブを **1 枚の新しいウィンドウ**へまとめて分離します(左右並べ見に便利):
-
-```bash
-kb tabs detach 3             # タブ 3 を単独で新しいウィンドウへ
-kb tabs detach 2 3 5         # タブ 2, 3, 5 をまとめて 1 つの新ウィンドウへ
-```
-
-ウィンドウ操作中にフォーカス中のタブを分離するキー割り当て:
-
-```bash
-kb daemon start --detach-key            # 既定コンボ Alt+Shift+D
-kb daemon start --detach-key "Ctrl+Shift+O"   # 好きなコンボに。"off" で無効化
-```
-
-> Chromium の CDP には既存タブを別ウィンドウへ *移動* する API が無いため、kb は各タブを現在の URL で新ウィンドウに開き直し、元タブを閉じます。**引き継がれるのは URL だけ**(ページ内 JS 状態・フォーム入力・スクロール位置・履歴は保持されません)。キー割り当て版は小さな page-world リスナーを注入するので、厳密なステルス閲覧時は無効(既定の `--detach-key off`)のままにしてください。
-
-## ボットチェックを通す
-
-通常の kb 操作では `--disable-blink-features=AutomationControlled` で `navigator.webdriver` を隠し、実 Chrome/Edge があればそれを使います。ただし Cloudflare は production challenge を Playwright 等の自動ブラウザで解くことを[サポートしていません](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/)。kb も自動突破を保証せず、許可された対象で人が Verify する経路と、通過後のセッション整合性を保つことに限定します。
-
-Verify 前後では **同じ headed 実 Chrome・profile・UA・proxy/IP** を維持してください。UA の途中変更、VPN/proxy の切替、拡張機能は Cloudflare 公式にも[challenge loop の要因](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)として挙げられています。`kb session check` は実効 UA と UA Client Hints の major 不一致、custom UA、使用中 proxy、`cf_clearance` の存在と期限を値を出さずに診断します。`cf_clearance` は継続的に再評価されるため、Cookie があるだけで将来の通過を保証するものではありません。
-
-```bash
-kb login example.com --until-gone "iframe[src*='challenges.cloudflare.com']"   # チャレンジを解く → 記憶される
-kb session check https://example.com/account                                  # UA/UA-CH・proxy・challenge を診断
-kb request https://example.com/api/me --via-browser                           # Verify 済みタブと同じ経路で送信
-# または自分で起動した実 Chrome にアタッチ:
-kb daemon start --cdp http://127.0.0.1:9222
-```
-
-`--via-browser` は active tab と同一 origin の URL だけを、そのページ内の `fetch(..., {credentials:'include'})` で送ります。Cookie だけを共有する通常の `kb request` と違い、ブラウザの TLS・UA・Origin・継続セッションをそのまま使います。CORS / CSP / Fetch の制約は迂回せず、`Cookie` / `User-Agent` / `Origin` 等のブラウザ管理ヘッダは手動指定できません。`--no-follow` / `--follow-verbose` とは併用できず、Fetch API が `Set-Cookie` を公開しないため値は表示しません（Cookie jar への反映はブラウザが行います）。
-
-ただし、**アカウント作成そのものが Cloudflare 等に阻まれる対象**では、`kb login` を始めた時点ですでに Playwright/CDP 配下です。この場合は signup 引き継ぎフローを使います:
-
-```bash
+```sh
 kb daemon stop
-kb signup bootstrap target-a https://target.example/signup \
-  --check-url https://target.example/account \
-  --expect-selector "#account-menu"
-# 開いた通常 Chrome で登録・Turnstile・メール/SMS確認を完了し、ウィンドウを閉じる
-kb signup adopt target-a --restore-proxy
-kb signup status target-a
 ```
 
-`bootstrap` はインストール済み Chrome(または `--channel msedge`)を、専用 profile `signup-<name>` で直接起動します。この段階では Playwright / CDP / remote debugging / automation / stealth 用フラグを一切使いません。接続も既定は **direct**(`--no-proxy-server`)なので、Burp/Caido の MITM による TLS/HTTP-2 指紋変化を登録時だけ避けられます。OS の proxy が必要なら `--system-proxy` を指定します。
+`daemon` は、ブラウザを起動したまま管理する裏側のプログラムの名前です。最初は「終了するときに使うコマンド」と覚えれば十分です。
 
-`adopt` には dashboard/account 等の **ログイン後 URL** が必須です(`bootstrap --check-url` で記録するか、adopt 時に指定)。同じ profile を kb で開き、まず direct のまま `session check` を実行します。チャレンジ、到達不能、check URL からログイン画面へのリダイレクトは成功扱いにしません。さらに `--expect-selector`(ログイン後だけ見える要素)と `--expect-cookie`(名前だけ。判定結果には値を出さない)を任意の成功条件として加えられます。
+### 3. よく使う操作を足す
 
-すべての条件に成功したときだけ Cookie + localStorage の checkpoint を `~/.kb/signups/<name>/storage-state.json` に保存します。`kb signup checkpoint` も毎回同じ条件を再診断し、劣化時は既存の正常 checkpoint を上書きしません。`--restore-proxy` を付けると登録前の kb proxy に戻して再診断し、再チャレンジ・ログイン退避・到達不能が起きた場合は direct + 直前の正常 checkpoint へ自動 rollback して再確認します。
+| やりたいこと | コマンド |
+|---|---|
+| 別のページを新しいタブで開く | `kb open https://example.org --new` |
+| ページ全体を画像にする | `kb screenshot --full -o page.png` |
+| ページを日本語に翻訳する | `kb translate` |
+| 翻訳を原文に戻す | `kb translate --restore` |
+| 開いているタブを見る | `kb tabs` |
+| コマンドの使い方を見る | `kb --help` |
 
-通常 Chrome は adopt 前に必ず**ウィンドウから正常終了**してください。同じ profile を同時に開くと破損し得るため、kb デーモン稼働中や、その profile の `--user-data-dir` を保持する Chrome 子プロセスが残っている間は引き継ぎを拒否します。途中から再開する場合だけ `bootstrap ... --reuse-profile` を使います(カスタム profile/channel・元 proxy・成功条件・checkpoint は保持)。
+翻訳にはページの文章を Google の翻訳サービスへ送信します。クリックやフォーム入力は [使い方ガイド](docs/USAGE.ja.md#ai-エージェントから使う) に例があります。
 
-重要: 有効期限のない **session Cookie は Chrome の版や session restore 方針により、正常終了時に消える場合と復元される場合があります**。この方式では維持を保証しません。可能なら登録時に「ログイン状態を保持する」を選び、期限付き認証 Cookie を発行させてください。`--expect-cookie <名前>` を付ければ、消失を成功扱いせず検出できます。期限付き Cookie が発行されない対象では `kb login` または、対象のルール上許可される場合に `--cdp` を使います。
+## AI と一緒に使う
 
-checkpoint にはログイン秘密情報が含まれるため、共有・コミットしないでください。また、この機能はチャレンジを自動突破するものではなく、許可された対象で人が正規に完了した登録状態を安全に引き継ぐためのものです。
+kb を操作できる AI エージェントに接続すると、たとえばこんな依頼ができます。
 
-## ログイン状態の維持
+> kb でこのページを開いて、本文の要点をまとめて。最後にスクリーンショットも保存して。
 
-**サインインは一度だけ。** kb は永続プロファイル(`~/.kb/profiles/`)でブラウザを起動するため、Cookie・localStorage はデーモンを再起動しても残ります。よく使うサービスへの初回サインインは `kb login` で:
+kb がページを開いて情報を渡し、AI がそれを読んで要約します。ログインが必要な場面では、自分でブラウザを操作してから続きを任せられます。
 
-```bash
-kb login github.com          # headed に切り替えて開く → ウィンドウでサインイン → Enter で完了確認
-kb login myapp.example.com --until "**/dashboard**"   # URL で完了を自動検知(エージェント向け)
-kb login github.com --save gh-state.json              # ついでにファイルへバックアップ
-```
+Claude Code を使っている場合は、kb のインストール後に次で接続できます。
 
-以降のセッションでは何もしなくてもログイン済みの状態で始まります。`--save` したファイルは `kb storage restore <file>` で別プロファイルや別マシンに持ち込めます。
-
-注意: 有効期限のない session cookie はブラウザの再起動・session restore 方針に従うため、再起動をまたいだ維持を保証できません。状態が残っている間に `kb storage dump / restore` を使えば明示的に引き継げます。`storage dump` は **HttpOnly を含む全 Cookie** + localStorage を書き出します(Playwright storageState 形式)。
-
-複数アカウントを同時に使いたい場合は、`KB_HOME` を分けてデーモンを 2 つ立てるのが現状の方法です(1 デーモン 1 プロファイル):
-
-```bash
-KB_HOME=~/.kb-alt kb daemon start --profile account2   # 2 つ目は独立したデーモンとして併走
-```
-
-## 起動済みブラウザへのアタッチ
-
-`--remote-debugging-port` 付きで起動した Chrome / Edge に、新しくブラウザを立てずに接続できます。そのブラウザのサインイン状態・拡張機能・設定をそのまま使って自動操作できます:
-
-```bash
-# 1. 対象ブラウザを CDP 付きで起動(専用プロファイル)
-chrome --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\kb-attach"
-
-# 2. kb をアタッチモードで起動
-kb daemon start --cdp http://127.0.0.1:9222
-kb tabs                    # 開いているタブがそのまま見える
-kb open myapp.example.com  # 以降は通常どおり操作できる
-kb daemon stop             # 切断のみ。対象ブラウザは閉じない
-```
-
-制約:
-
-- **Chrome 136 以降、普段使いの既定プロファイルではリモートデバッグが無効化されています**(セキュリティ変更)。上の例のように専用の `--user-data-dir` を指定して起動し、そこで必要なサービスにサインインしておいてください。一度サインインすればそのプロファイルに残ります。
-- アタッチ先の起動条件は変更できないため、`kb mode` / `kb profile` / `kb auth` はアタッチ中に使えません。proxy profile と relay rule の保存・切替はできますが、起動済みのアタッチ先ブラウザの通信経路には反映されません。
-- open / click / snapshot / eval / screenshot / net log / net body / cookies / storage などの操作系・観測系はすべて使えます。
-
-## Chrome 拡張機能
-
-Playwright は既定で拡張機能を無効化(`--disable-extensions`)して起動しますが、`--extensions` でこれを外して拡張を使えます:
-
-```bash
-kb daemon start --extensions "C:\dev\my-extension"      # 解凍済み拡張を読み込む(カンマ区切りで複数可)
-kb daemon start --extensions on                         # 有効化のみ(プロファイルにインストール済みの拡張を使う)
-kb daemon start --extensions off                        # 無効に戻す(既定)
-```
-
-- **解凍済み(unpacked)拡張** — `manifest.json` を含むディレクトリを指定します(`.crx` は不可)。自作拡張の開発・検証に便利です。
-- **ストアの拡張** — `--extensions on` + headed で起動し、ウィンドウ上で Chrome Web Store から普通にインストールします(chrome チャネル推奨)。プロファイルに永続化されるので、以降は `--extensions on` だけでロードされます。
-- 設定は `--channel` / `--ua` と同様に次回の自動起動へ引き継がれます。解除は `--extensions off`。
-
-制約:
-
-- **未パック拡張の読み込みは同梱 Chromium で行われます**(ディレクトリ指定時はチャネル自動選択が同梱 Chromium になる)。Chrome 137 以降の stable Chrome は `--load-extension` フラグを削除したため、実 Chrome チャネルでは読み込めません(`--extensions on` によるインストール済み拡張の有効化はどのチャネルでも動きます)。
-- headless でも動作します(拡張が動く新 headless を自動選択)。
-- `--cdp`(アタッチ)とは併用不可 — アタッチ先ブラウザに直接インストールされた拡張はそのまま使えます。
-
-## API デバッグ
-
-自作サイトの API が想定外の値を返したときは、HAR を回さなくてもその場で本文を読めます:
-
-```bash
-kb net log --filter "api"    # 行頭の #seq を確認
-kb net body 42               # そのレスポンス本文を表示(JSON もそのまま読める)
-kb net headers 42            # 全リクエスト/レスポンスヘッダ(Cookie・キャッシュ制御の確認に)
-```
-
-エラー時の画面を確認したいときは、既存のエンドポイントをそのまま差し替えられます:
-
-```bash
-kb net mock "**/api/users" --status 500 --text '{"error":"internal"}'   # 以降の一致リクエストが 500 に
-kb reload                                                               # エラー画面を確認
-kb net unroute 1                                                        # 元に戻す
-```
-
-本文はテキスト系(JSON / HTML / JS / XML 等)の XHR / fetch / document レスポンスについて自動で捕捉されます。捕捉は **1 件 256KB で切り詰め**(全体 32MB / 500 件、古い順に破棄)。`--offset` は捕捉済みの範囲内のページングで、256KB を超えた部分は後から取り戻せません — 大きなレスポンスの全文が必要なときは `kb request <url> -o <file>` で取り直してください。
-
-開発中のエンドポイントを直接叩くには `kb request`(ミニ REST クライアント):
-
-```bash
-kb request localhost:3000/api/users                    # GET
-kb request localhost:3000/api/users -X POST -d '{"name":"a"}'   # JSON ボディは Content-Type: application/json を自動付与
-kb request api.example.com/v2/me -H "Accept: application/vnd.api+json" -H "X-Api-Version: 2"
-```
-
-`-H` で明示したヘッダが常に優先されます(JSON 自動付与は Content-Type 未指定のときだけ)。
-
-既定モードはページを開かない `context.request` で、**Cookie jar とプロキシ設定をブラウザと共有**します。通常の認証 API、任意 origin、redirect 調査に向き、レスポンスの Set-Cookie もブラウザに反映されます。バイナリは `-o <file>` で保存できます。
-
-Cloudflare 等で Verify 済みページと同じ通信経路が必要なら、対象 origin をタブで開いたまま `--via-browser` を使います:
-
-```bash
-kb open https://app.example.com/account
-kb request https://app.example.com/api/me --via-browser          # active tab を使用
-kb request https://app.example.com/api/me --via-browser -t 3     # タブを明示
-```
-
-このモードは同一 origin 限定で、通常の CSP / CORS / Fetch 制約を受けます。`Cookie` / `User-Agent` / `Origin` / `Sec-*` 等はブラウザが付けるため `-H` で上書きできません。
-
-通常モードではレスポンスの **Set-Cookie を既定で個別行表示**し(複数個でも 1 行に潰れず parse できます)、`-i` で全レスポンスヘッダも表示できます(MCP は `includeHeaders`)。`--json` では `result.setCookies` に配列で入ります。`--via-browser` では Fetch API の制約により Set-Cookie 値は読めませんが、ブラウザの Cookie jar には反映されます。
-
-```bash
-kb request localhost:3000/api/login -X POST -d '{"user":"a"}'   # Set-Cookie: sid=… が本文の前に表示される
-kb request localhost:3000/api/me -i                              # 全レスポンスヘッダ + 個別 Set-Cookie
-```
-
-通常モードのリダイレクトは既定で追従します。`--no-follow` で 3xx の時点で止め、**`--follow-verbose`** で追従しつつ各ホップの status / `Location` / `Set-Cookie` を表示します(リダイレクト先の確認や、途中で撒かれる Cookie の分析に。メソッド処理はブラウザ準拠で 303 と 301/302 の POST は GET 化、307/308 は維持)。`--json` では中間ホップが `result.hops` に入ります。`--via-browser` はブラウザが redirect chain の中間ヘッダを公開しないため、これら 2 オプションと併用できません。
-
-```bash
-kb request example.com/login --follow-verbose      # 302 → 301 → 200。各ホップの Set-Cookie も表示
-kb request example.com/old-path --no-follow         # 最終遷移先でなく 3xx 自体を表示
-```
-
-## 操作記録と共有バンドル
-
-デーモンは**既定で操作を常時記録**します(コマンド・xhr/fetch/document の通信・コンソール出力)。作業後に 1 コマンドで、第三者がレビューし再実行に使える自己完結バンドルを生成できます。観測通信は best-effort の curl として残りますが、browser 経路は Cookie / UA / Origin / TLS を curl で忠実に再現できないため、command event を同じ kb コマンドとしても保存します:
-
-```bash
-kb log export                 # ./kb-log-<session>/ を生成
-kb log export -o out --no-mask --allow "^cookie$" --deny "internal\.corp"
-```
-
-```
-kb-log-<session>/
-├─ report.md      # 連番ステップ + 各ステップの通信/コンソール + スクショ(まずこれを読む)
-├─ steps.md       # 再現手順(kb コマンド列)
-├─ events.jsonl   # マスク済みジャーナル(機械可読)
-├─ requests/      # 通常通信は curl、browser 経路は同じ kb コマンドで再実行する .sh
-├─ shots/         # スクリーンショット
-└─ meta.json      # セッション情報
-```
-
-**機微な値は既定でマスク**されます(`[MASKED]`): 入力値(fill)、eval の戻り値、Authorization / Cookie 等のヘッダ、ボディ内の password / token 系キー、**URL クエリの機微キー**(`?api_key=…` 等。Location / Referer ヘッダや本文中の URL も対象)。解除は明示 `--no-mask`、微調整は `--allow` / `--deny`(正規表現)。**手元の生ジャーナル(`~/.kb/logs/`)は無改変**で、マスクは export / show 時にだけ適用されます — レポートはいつでも再生成できます。
-
-注意: `eval` の式や `net mock --text` の引数は「あなたが書いたコード」として逐語記録されます(マスクは値に対して働く)。引数に機微な値を直書きした場合は `--deny <regex>` で潰してから共有してください。また**生ジャーナルには機微な値が平文で残る**ため、共有には必ず export を使ってください。古いセッションはデーモン起動時に自動削除されます(既定: 直近 20。`KB_LOG_KEEP` で変更)。
-
-既知の限界: URL の**パスセグメントに埋まった値**(`/verify/<値>` のようにキー名がないもの)は自動検出できません(クエリの入れ子 URL は再帰的にマスクされます)。該当する場合は `--deny <regex>` で明示的に潰してください。
-
-セッションはデーモンの起動ごとに自動分割され、`kb log start --name <n>` で明示的に区切ることもできます(`--shots` を付けると操作のたびに自動スクリーンショットが記録され、report.md に載ります)。`kb log show` で直近イベント、`kb log steps` で番号付き再現手順を確認できます。
-
-記録した操作は**そのまま再実行**できます:
-
-```bash
-kb log replay              # 最新セッションの操作を順に再実行(タブ指定はアクティブタブに読み替え)
-kb log replay mysession --dry-run          # 何が実行されるかだけ確認
-kb log replay mysession --from 5 --continue-on-error
-```
-
-replay はタブ指定を現在のアクティブタブに読み替えるため、**複数タブに跨る記録は完全には再現されない**ことがあります(単一タブのフローが対象)。
-
-## プロキシプロファイル (FoxyProxy 風)
-
-```bash
-kb proxy add work --type http --host 10.0.0.1 --port 8080 --user u --pass p --bypass "*.internal"
-kb proxy use work                              # ブラウザ無再起動で即時切替
-kb proxy rule add "*.corp.example.com" work    # このホストだけ work 経由(先勝ち)
-kb proxy test                                  # 外部 IP と応答時間で疎通確認
-kb proxy status                                # デーモンに実際に適用中の状態
-```
-
-仕組み: Chromium は常にデーモン内のローカル中継プロキシを向き、切替時は中継の上流だけを差し替えます。このため再起動不要で、Chromium が非対応の SOCKS5 認証も中継層が代行できます。中継自体もセッション毎のトークンで認証され、他のローカルプロセスからは利用できません。
-
-よくある上流の繋ぎ方の実例:
-
-```bash
-# 会社プロキシ配下で作業する(認証付き、社内ホストは直結)
-kb proxy add corp --type http --host proxy.corp.example.com --port 8080 \
-  --user myuser --pass mypass --bypass "*.internal,localhost"
-kb proxy use corp
-
-# ローカルの mitmproxy / モックサーバ越しに開発する
-kb proxy add local --type http --host 127.0.0.1 --port 8081
-kb proxy use local     # 無再起動で即時切替
-kb proxy off           # 直結に戻す(これも無再起動)
-```
-
-接続に失敗したとき(ブラウザ側では `ERR_TUNNEL_CONNECTION_FAILED`)は、`kb proxy status` に直近の接続エラー(相手ホスト・経由プロファイル・原因)が表示され、`~/.kb/daemon.log` にも記録されます。
-
-## AI エージェントから使う
-
-**Claude Code からは MCP 経由を推奨** — ネイティブツールとして呼べるため、Bash 出力のパースが不要になります:
-
-```bash
+```sh
 claude mcp add kb -- kb-mcp
 ```
 
-`kb_snapshot` `kb_open` `kb_text` `kb_translate`(ページ翻訳)`kb_screenshot`(画像で返る)`kb_click` `kb_fill` `kb_select` `kb_eval` `kb_dialog`(alert/confirm/prompt への応答)`kb_tabs_detach`(タブを別ウィンドウへ)`kb_request` `kb_net_log` `kb_net_body` `kb_net_headers` `kb_proxy_use` など 34 ツールを公開。
+ここでの MCP は、AI が外部ツールを呼び出すための接続方式です。kb は 34 個の操作ツールを公開しています。ターミナルのコマンドを実行できるエージェントなら、`kb` を直接呼び出す方法もあります。[接続と操作の詳しい例](docs/USAGE.ja.md#ai-エージェントから使う)
 
-**Bash 経由**でも全機能を使えます(action 実行後は全コマンド `--json` 対応、成功 `{ok:true,result}` / 失敗 `{ok:false,error}` の対称形。必須引数不足など action 前の構文エラーは stderr のテキスト + exit 1)。推奨ループ:
+## よくある質問
 
-```bash
-kb open example.com --wait idle   # SPA は idle 待ち
-kb snapshot                       # ref 付きで構造を把握
-kb click --ref e12                # ref で操作(操作後の URL/タイトルが返る)
-kb text                           # 結果を読む
+### 普段の Chrome のログインは引き継がれる？
+
+通常起動では別の保存領域を使うため、自動では引き継がれません。kb のウィンドウでログインすると、その状態を保存します。サイト側の有効期限などによって、再ログインが必要になることはあります。
+
+### Windows と Mac で同じ更新を使える？
+
+はい。同じ GitHub リポジトリから更新できます。Windows 側の変更が GitHub に push されていれば、Mac でも取り込めます。各 PC の `kb-browser` フォルダで、次を 1 行ずつ実行し、エラーが出たらそこで止めて内容を確認してください。
+
+```sh
+git pull --ff-only
+npm ci
+npm run build
 ```
 
-**往復を減らす一発操作**: 対象がテキストで特定できるなら snapshot を挟まず Playwright のセレクタエンジンをそのまま使えます:
+kb が起動中なら、作業を区切って `kb daemon restart` で更新を反映します。再起動前に必要なタブの URL や入力中の内容を控えてください。ブラウザのログイン情報や設定は PC ごとに保存され、自動同期されません。
 
-```bash
-kb click "text=保存"                       # テキスト一致で 1 コマンド
-kb click "role=button[name='Save']"        # ロール + アクセシブルネーム
-```
+### データはどこに保存される？
 
-ref 使用時も、ページの再レンダで ref が失効した場合は同じ role/name の要素へ自動再解決されるため、snapshot の取り直しは失敗時だけで済みます。
+ログイン情報・設定・操作ログは、ユーザーフォルダ内の `.kb` に保存されます。操作ログは既定で記録され、入力内容や認証情報を含むことがあります。共有するときは `kb log export` で書き出し、内容を確認してください。
 
-**手動介入との連携**: ログインや CAPTCHA はユーザーがウィンドウで直接操作し、エージェントは `kb wait --url "**dashboard**"` で完了を検知して再開できます。初回サインインの段取りは `kb login` にまとまっています。
+AI と連携した場合、ページ本文や画像などの操作結果は接続先の AI に渡ります。
 
-## セキュリティ調査・バグバウンティの recon
+### Linux でも使える？
 
-kb は**認可された**セキュリティテスト・バグバウンティの偵察に使える駆動系です — すべて上記のコマンドの組み合わせで実現できます:
+Linux 向けの実装もあります。WSL で単体テストを確認していますが、この README では Windows・macOS の導入を中心に案内しています。ブラウザ用ライブラリなどの準備については [開発メモ](CLAUDE.md) を参照してください。
 
-- **認証付き API テスト / IDOR** — `kb request` はブラウザの Cookie とプロキシを共有するので、ログイン済みユーザーとして認可保護されたエンドポイントを検証できる。プロファイル(または `KB_HOME` を分けた 2 デーモン)で 2 アカウントを並走させ、オブジェクトアクセスの差分を取る。
-- **SPA のランタイム recon** — `kb eval` はページ context で任意 JS を実行し、Cookie・トークン・クライアント側のルート表などを redaction なしの生値で返す。DOM XSS の確認やクライアント設定の抽出に。
-- **通信の監視・改変** — `kb net log / body / headers` で捕捉済みのリクエスト/レスポンスを読み、`kb net mock / block` でその場で書き換えてエラーハンドリングやクライアント側の信頼を検証。
-- **プロキシチェーン** — kb の上流を Burp や Caido に向け、全トラフィックを傍受プロキシ経由に(無再起動で切替可)。
-- **実サインイン済みセッションへのアタッチ** — `--cdp` で手動サインイン(SSO / 2FA / passkey)済みの Chrome を再利用でき、real-auth な対象も再ログインなしで扱える。
-- **再現可能な証跡** — `kb log export` が**機微値マスク済み**のバンドル(レポート + 手順 + request script + スクショ)を生成。browser 経路の再実行は kb を使って browser 状態を維持する。
-- **エージェント駆動・headless** — サブエージェントが常駐デーモンに対して並列で recon を回せる。
+## もっと詳しく
 
-> **認可された対象のみをテストしてください。** 各プログラムの rules of engagement に従うこと — 多くのバグバウンティは自動スキャン・過剰なリクエストレート・anti-bot / WAF の回避を禁止しています。kb は駆動系であって許可ではありません。scope とポリシーを先に確認してください。
+- [使い方ガイド](docs/USAGE.ja.md) — クリック・入力、翻訳、ログイン、AI 連携、通信の確認、プロキシなど。
+- [CLI / MCP 完全リファレンス](docs/CLI_REFERENCE.ja.md) — すべてのコマンド、オプション、環境変数。
+- [開発・内部構造](CLAUDE.md) — Playwright + Chromium による仕組み、ビルド、テスト手順。
 
-## アーキテクチャ
-
-```
-kb (CLI) ──HTTP+token──▶ デーモン ── Playwright persistent context ──▶ Chrome/Edge/Chromium
-kb-mcp (MCP stdio) ──┘      └─ ローカル中継プロキシ(token 認証)──▶ 上流プロキシ (profiles/rules)
-```
-
-状態は `~/.kb/`(daemon.json / proxies.json / profiles/ / downloads/ / daemon.log)。
-
-## 開発
-
-```bash
-npm test        # ビルド + ユニットテスト (node:test、ブラウザ不要)
-npm run test:e2e  # ビルド + ブラウザ e2e スモーク(隔離 KB_HOME で実デーモンを起動。ブラウザ未導入なら自動 skip)
-npm run test:all  # 両方
-```
-
-## License
-
-MIT
+ライセンス: [MIT](LICENSE)
